@@ -16,7 +16,6 @@
         view: 'home',              // home | discover | search | detail | settings | history
         query: '',
         detail: null,              // { title, results:[搜索结果...], selectedIdx, episodes:[], videoInfo }
-        detailFrom: '',            // 详情页是从哪个视图进来的（返回键据此回去，如历史页）
         discover: { form: '电影', genre: '', country: '', sort: 'U', tags: [], pageStart: 0, delMode: false,
                     loading: false, done: false, seen: new Set() },
         homeStale: false,          // 设置里改了影响首页的开关后置位
@@ -329,13 +328,50 @@
             const score = primary + cross * 2.5;
             if (score < bestScore) { bestScore = score; best = el; bestRect = r; }
         }
+        // 从键盘进拼音候选栏：落在第一个字（最常用的那个），而不是正上方碰巧对着的字
+        if (best && best.closest('#pyCands') && !current.closest('#pyCands')) {
+            const first = best.parentElement.querySelector('.py-cand');
+            if (first) { best = first; bestRect = null; }
+        }
         if (best) setFocus(best, true, bestRect);
     }
 
     // ============================================================
     //  2. 视图切换
     // ============================================================
-    function showView(name) {
+    // 返回栈：每次往前走（点顶部导航、进详情）先把当前页和焦点压进来，返回键逐个弹出，
+    // 严格回到上一页、焦点落回离开时那张卡。之前返回是写死的（详情回搜索/主页、其余一律回主页），
+    // 从主页或发现页进详情再返回会被甩到搜索页，从设置进历史再返回也直接回了主页。
+    const navStack = [];
+    const NAV_STACK_MAX = 30;
+
+    // 焦点节点可能随重渲染被换掉（历史页、设置页每次进来都重建），记下所在容器和文字/序号，回来时照着找
+    function focusMark() {
+        const el = current && current.isConnected ? current : null;
+        if (!el) return null;
+        const parent = el.parentElement;
+        const sibs = parent ? [...parent.querySelectorAll(':scope > .focusable')] : [];
+        return { el, parentId: parent && parent.id, text: el.textContent, index: sibs.indexOf(el) };
+    }
+    function resolveMark(m) {
+        if (!m) return null;
+        if (m.el.isConnected && m.el.offsetParent !== null) return m.el;
+        const box = m.parentId && document.getElementById(m.parentId);
+        if (!box) return null;
+        const sibs = [...box.querySelectorAll(':scope > .focusable')];
+        return sibs.find(e => e.textContent === m.text) || sibs[m.index] || sibs[sibs.length - 1] || null;
+    }
+
+    // 往前走到新页面（返回键能回到这里）
+    function goView(name) {
+        if (name === state.view) return;
+        navStack.push({ view: state.view, focus: focusMark() });
+        if (navStack.length > NAV_STACK_MAX) navStack.shift();
+        showView(name);
+    }
+
+    // restoreFocus: 返回时要落回的焦点，不给就用各页默认焦点
+    function showView(name, restoreFocus) {
         state.view = name;
         document.querySelectorAll('.tv-view').forEach(v => v.classList.remove('active'));
         const map = { home: 'viewHome', discover: 'viewDiscover', search: 'viewSearch', detail: 'viewDetail', settings: 'viewSettings', history: 'viewHistory' };
@@ -353,7 +389,9 @@
         else if (name === 'history') renderHistoryView();
         // 默认焦点
         setTimeout(() => {
-            if (name === 'home') setFocus(document.querySelector('#rows .tv-tile') || document.getElementById('heroPlay'));
+            const back = typeof restoreFocus === 'function' ? restoreFocus() : null;
+            if (back) setFocus(back);
+            else if (name === 'home') setFocus(document.querySelector('#rows .tv-tile') || document.getElementById('heroPlay'));
             else if (name === 'discover') setFocus(document.querySelector('#discForm .chip'));
             else if (name === 'search') setFocus(document.querySelector('#keyboard .key'));
             else if (name === 'settings') setFocus(document.querySelector('#srcActions .chip'));
@@ -370,16 +408,25 @@
             return;
         }
         // 搜索页：焦点深入结果时第一次返回先跳回键盘区，再按一次才退出
+        // 拼音候选栏里按返回：回到键盘接着打，不离开搜索页
+        if (state.view === 'search' && current && current.closest('#pyCands')) {
+            setFocus(pyFallbackFocus());
+            return;
+        }
         if (state.view === 'search' && current && current.closest('#searchResults')) {
             smoothScrollTo(document.getElementById('viewSearch'), 0);
             setFocus(document.querySelector('#keyboard .key'));
             return;
         }
-        if (state.view === 'detail') {
-            showView(state.detailFrom === 'history' ? 'history' : (state.query ? 'search' : 'home'));
-        }
-        else if (state.view !== 'home') { showView('home'); }
-        else { /* home：无处可退 */ }
+        popView();
+    }
+
+    // 回到上一页；栈空时（首页）无处可退，返回 false
+    function popView() {
+        const prev = navStack.pop();
+        if (!prev) return false;
+        showView(prev.view, () => resolveMark(prev.focus));
+        return true;
     }
 
     // ============================================================
@@ -419,7 +466,7 @@
     window.tvBack = function () {
         const busy = optGate.active || promptGate.active || filterGate.active ||
             pwGate.active || loadingGate.isUp();
-        if (busy || state.view !== 'home') {
+        if (busy || navStack.length) {
             // 交给上面那条统一链路：该关弹层的关弹层，该逐级返回的逐级返回
             document.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'Backspace', keyCode: 8, bubbles: true, cancelable: true
@@ -533,11 +580,11 @@
         tile.innerHTML = `
             <div class="thumb">
                 <img src="${proxyImg(item.cover)}" loading="lazy"
-                     onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">
+                     onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';this.parentElement.classList.add('noimg');">
                 <div class="fallback" style="display:none">${safeTitle}</div>
                 ${item.rate ? `<div class="badge">★ ${item.rate}</div>` : ''}
-            </div>
-            <div class="label">${safeTitle}</div>`;
+                <div class="cap"><div class="cap-title">${safeTitle}</div></div>
+            </div>`;
         if (!portrait) tile._doubanItem = item;   // 供 Billboard 焦点跟随使用（仅首页）
         tile.onclick = () => openDetailByTitle(item.title, item.cover);
         return tile;
@@ -756,7 +803,9 @@
     // 这个标记让搜完后的第一个字自动把上一轮的词清掉，不用先摸到「清空」键。
     let queryCommitted = false;
     function appendQuery(ch) {
-        if (queryCommitted) { state.query = ''; queryCommitted = false; }
+        if (queryCommitted) { state.query = ''; pyBuf = ''; queryCommitted = false; }
+        // 拼音模式下字母先进拼音缓冲区，等选字；数字、空格照常直接上屏
+        if (pyMode && /^[a-z]$/i.test(ch)) { pyBuf += ch.toLowerCase(); pyPage = 0; renderQuery(); return; }
         state.query += ch;
         renderQuery();
     }
@@ -766,6 +815,92 @@
         state.query = next;
         renderQuery();
     }
+    // 删除键：拼音缓冲区里还有字母就先删字母，删空了再删已上屏的字
+    function deleteOne() {
+        if (pyBuf) { queryCommitted = false; pyBuf = pyBuf.slice(0, -1); pyPage = 0; renderQuery(); return; }
+        editQuery(state.query.slice(0, -1));
+    }
+
+    // ---------- 离线全拼输入：打拼音逐字选成中文 ----------
+    // 首字母联想只认热门片名（联想接口一次只给前 10 条热门词），冷门片名靠它打不出来。
+    // 拼音模式下字母先攒在 pyBuf 里，候选栏按字表（js/pinyin-dict.js）列出第一个音节的字，
+    // 选一个就上屏并吃掉这个音节，接着列下一个音节，片名能一字不差地打出来。
+    const PY_DICT = window.PINYIN_DICT || {};
+    const PY_PAGE = 10;
+    let pyMode = localStorage.getItem('kbPinyin') === 'true';
+    let pyBuf = '', pyPage = 0;
+    let pyReturnKey = null;   // 选完字、缓冲区空了之后焦点落回的那个键
+
+    // 缓冲区开头能认出的音节 → { len: 吃掉几个字母, chars: 候选字 }
+    // 先找最长的完整音节（xian 不拆成 xi+an）；打到一半的（zh、xia→xiang…）
+    // 把所有以它开头的音节的字按各自频率交错排在一起
+    function pySegment(buf) {
+        for (let n = Math.min(6, buf.length); n > 0; n--) {
+            const p = buf.slice(0, n);
+            if (PY_DICT[p]) return { len: n, chars: [...PY_DICT[p]] };
+        }
+        for (let n = Math.min(6, buf.length); n > 0; n--) {
+            const p = buf.slice(0, n);
+            const lists = Object.keys(PY_DICT).filter(k => k.startsWith(p)).map(k => [...PY_DICT[k]]);
+            if (!lists.length) continue;
+            const out = [], seen = new Set();
+            for (let i = 0; lists.some(l => i < l.length); i++) {
+                lists.forEach(l => { if (l[i] && !seen.has(l[i])) { seen.add(l[i]); out.push(l[i]); } });
+            }
+            return { len: n, chars: out };
+        }
+        return { len: buf.length, chars: [] };   // 不是拼音（如 v 开头），没有候选
+    }
+
+    function pyFallbackFocus() {
+        return pyReturnKey && pyReturnKey.isConnected ? pyReturnKey : document.querySelector('#keyboard .key');
+    }
+
+    function renderPinyinCands(keepFocus) {
+        const box = document.getElementById('pyCands');
+        if (!box) return;
+        const hadFocus = keepFocus || (current && box.contains(current));
+        box.innerHTML = '';
+        if (!pyMode || !pyBuf) {
+            // 拼音模式下候选栏常驻（放一句提示占位），免得打第一个字母时键盘整体往下跳
+            if (pyMode) box.innerHTML = '<span class="chips-label">拼音选字：用下方键盘打全拼，如 manjianghong</span>';
+            if (hadFocus) setFocus(pyFallbackFocus());
+            return;
+        }
+        const seg = pySegment(pyBuf);
+        const pages = Math.max(1, Math.ceil(seg.chars.length / PY_PAGE));
+        pyPage = Math.min(pyPage, pages - 1);
+        const label = document.createElement('span');
+        label.className = 'chips-label';
+        label.textContent = pyBuf.slice(0, seg.len) + (pyBuf.length > seg.len ? ' ' + pyBuf.slice(seg.len) : '') +
+            (seg.chars.length ? '：' : '：没有对应的字');
+        box.appendChild(label);
+        if (pyPage > 0) box.appendChild(chipBtn('‹', () => { pyPage--; renderPinyinCands(true); }, 'py-page'));
+        seg.chars.slice(pyPage * PY_PAGE, (pyPage + 1) * PY_PAGE).forEach(ch =>
+            box.appendChild(chipBtn(ch, () => pickPinyin(ch, seg.len), 'py-cand')));
+        if (pyPage < pages - 1) box.appendChild(chipBtn('›', () => { pyPage++; renderPinyinCands(true); }, 'py-page'));
+        // 焦点原本在候选栏（选字/翻页）：留在候选栏第一个字上，接着选下一个
+        if (hadFocus) setFocus(box.querySelector('.py-cand') || box.querySelector('.py-page') || pyFallbackFocus());
+    }
+
+    function pickPinyin(ch, len) {
+        queryCommitted = false;
+        state.query += ch;
+        pyBuf = pyBuf.slice(len);
+        pyPage = 0;
+        renderQuery();
+    }
+
+    function togglePinyin() {
+        pyMode = !pyMode;
+        try { localStorage.setItem('kbPinyin', String(pyMode)); } catch (e) {}
+        // 切回字母模式：没选完的拼音原样上屏，走首字母/全拼联想
+        if (!pyMode && pyBuf) { state.query += pyBuf; pyBuf = ''; }
+        buildKeyboard();
+        renderQuery();
+        setFocus(document.getElementById('kbMode'));
+        toast(pyMode ? '拼音输入：打全拼，从上方候选里选字' : '字母输入：首字母或全拼联想片名');
+    }
 
     function buildKeyboard() {
         const kb = document.getElementById('keyboard');
@@ -773,15 +908,18 @@
         KEYS.forEach(k => {
             const el = document.createElement('div');
             el.className = 'key focusable';
-            el.textContent = k;
-            el.onclick = () => appendQuery(k);
+            el.textContent = pyMode && /[A-Z]/.test(k) ? k.toLowerCase() : k;
+            el.onclick = () => { pyReturnKey = el; appendQuery(k); };
             kb.appendChild(el);
         });
         const space = keyBtn('空格', 'key focusable wide', () => appendQuery(' '));
-        const del = keyBtn('删除', 'key focusable wide act', () => editQuery(state.query.slice(0, -1)), 'backspace');
-        const clr = keyBtn('清空', 'key focusable', () => editQuery(''));
+        const del = keyBtn('删除', 'key focusable wide act', deleteOne, 'backspace');
+        const clr = keyBtn('清空', 'key focusable', () => { pyBuf = ''; editQuery(''); });
         const go = keyBtn('搜索', 'key focusable wide act', () => runSearch(), 'search');
-        kb.append(space, del, clr, go);
+        // 拼音选字 / 字母联想 切换，按键上显示的是当前模式
+        const mode = keyBtn(pyMode ? '拼音' : '字母', 'key focusable wide act', togglePinyin);
+        mode.id = 'kbMode';
+        kb.append(space, del, clr, go, mode);
     }
     function keyBtn(text, cls, fn, ic) {
         const el = document.createElement('div');
@@ -792,10 +930,18 @@
         return el;
     }
     function renderQuery() {
+        const buf = pyBuf ? '<span class="py-buf">' + esc(pyBuf) + '</span>' : '';
         document.getElementById('searchBox').innerHTML =
-            (state.query ? state.query.replace(/</g, '&lt;') : '<span style="color:var(--text-dim)">输入片名…</span>')
+            (state.query || pyBuf ? esc(state.query) + buf : '<span style="color:var(--text-dim)">输入片名…</span>')
             + '<span class="cursor">|</span>';
+        renderPinyinCands();
         scheduleSuggest();
+    }
+    // 联想/搜索用的输入：还没选字时拿拼音本身去联想（爱奇艺、百度都认全拼），
+    // 已经打出中文就只用中文，别把「满江hong」这种半截词送出去
+    function typedQuery() {
+        const q = state.query.trim();
+        return pyBuf && !hasCJK(q) ? (q + pyBuf).trim() : q;
     }
 
     // ---------- 拼音联想：字母输入 → 中文片名候选 ----------
@@ -974,14 +1120,14 @@
         clearTimeout(suggestTimer);
         const box = document.getElementById('searchSuggest');
         if (!box) return;
-        const q = state.query.trim();
+        const q = typedQuery();
         // 单字/单字母联想没意义，且遥控器逐字输入时每个字都要打三个接口，先攒够 2 位再问
         if (q.length < 2) { box.innerHTML = ''; suggestToken++; return; }
         suggestTimer = setTimeout(async () => {
             const token = ++suggestToken;
             try {
                 const titles = await resolveTitles(q);
-                if (token !== suggestToken || state.query.trim() !== q) return;   // 输入已变化，丢弃过期联想
+                if (token !== suggestToken || typedQuery() !== q) return;   // 输入已变化，丢弃过期联想
                 renderSuggestChips(titles);
             } catch (e) { /* 联想失败静默，不影响直接搜索 */ }
         }, 450);
@@ -998,6 +1144,7 @@
         box.appendChild(label);
         titles.slice(0, 8).forEach(t => box.appendChild(chipBtn(t, () => {
             state.query = t;
+            pyBuf = '';
             renderQuery();
             runSearch();
         })));
@@ -1024,6 +1171,8 @@
     }
 
     async function runSearch() {
+        // 拼音没选完就按搜索：已有中文就按中文搜，否则把拼音当字母输入去联想
+        if (pyBuf) { state.query = typedQuery(); pyBuf = ''; renderQuery(); }
         const raw = state.query.trim();
         if (!raw) { toast('请输入片名'); return; }
         if (!ensureVerified()) return;
@@ -1154,6 +1303,7 @@
         box.appendChild(label);
         history.forEach(h => box.appendChild(chipBtn(h.text, () => {
             state.query = h.text;
+            pyBuf = '';
             renderQuery();
             runSearch();
         })));
@@ -1210,11 +1360,11 @@
             tile.innerHTML = `
                 <div class="thumb">
                     <img src="${proxyImg(rep.vod_pic)}" loading="lazy"
-                         onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';">
+                         onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';this.parentElement.classList.add('noimg');">
                     <div class="fallback" style="display:none">${title}</div>
                     <div class="badge" style="color:#9cc2ff">${badge}</div>
-                </div>
-                <div class="label">${title}${rep.vod_remarks ? ' · ' + rep.vod_remarks : ''}</div>`;
+                    <div class="cap"><div class="cap-title">${title}</div>${rep.vod_remarks ? `<div class="cap-sub">${esc(rep.vod_remarks)}</div>` : ''}</div>
+                </div>`;
             tile.onclick = () => openDetail(items, 0);
             box.appendChild(tile);
         });
@@ -1239,10 +1389,11 @@
     // preferSource: 优先选中的源（历史入口传入，即上次看的那个源）
     async function openDetailByTitle(title, cover, resumeIndex, preferSource) {
         state.query = title || '';
+        pyBuf = '';   // 没选完的拼音别跟着片名一起留在搜索框里
         if (!ensureVerified()) return;
         const sources = getSources();
         if (!sources.length) { toast('没有可用采集源，请到「设置」中选择'); return; }
-        if (state.view !== 'detail') state.detailFrom = state.view;
+        goView('detail');
 
         const token = ++detailToken;
         state.detail = {
@@ -1254,7 +1405,6 @@
             preferSource: (preferSource && sources.includes(preferSource)) ? preferSource : '',
             waitFor: (preferSource && sources.includes(preferSource)) ? preferSource : '',
         };
-        showView('detail');
         // 先用豆瓣信息占位，剧集区等首个源返回后填充
         document.getElementById('detailPoster').src = proxyImg(hdCover(cover) || '');
         document.getElementById('detailTitle').textContent = title || '';
@@ -1312,10 +1462,9 @@
     // results: 同一影片的多个源结果，作为「播放源」切换（搜索结果页入口）
     async function openDetail(results, idx, doubanCover) {
         detailToken++;   // 使仍在进行的按标题搜索失效
-        if (state.view !== 'detail') state.detailFrom = state.view;
         state.detail = { results, selectedIdx: idx, doubanCover: doubanCover || '', pendingSources: [], fuzzy: [],
                          resumeIndex: -1, preferSource: '', waitFor: '' };
-        showView('detail');
+        goView('detail');
         renderSourceTabs();
         await loadEpisodes(idx);
     }
@@ -1699,10 +1848,10 @@
             }
             this.returnEl = null;
         },
-        // 返回键：收起浮层并离开发现页（焦点交给主页，不必落回卡片）
+        // 返回键：收起浮层并离开发现页，回到进发现页之前那一页
         leave() {
             this.close(false);
-            showView('home');
+            if (!popView()) showView('home');
         },
         onKey(e) {
             switch (e.key) {
@@ -2311,7 +2460,7 @@
     // ============================================================
     function bindNav() {
         document.querySelectorAll('#navMenu .focusable').forEach(btn => {
-            btn.onclick = () => showView(btn.dataset.nav);
+            btn.onclick = () => goView(btn.dataset.nav);
         });
     }
 
