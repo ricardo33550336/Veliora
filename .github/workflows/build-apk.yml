@@ -12,15 +12,15 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # --------------------------------------------------
+      # ==================================================
       # 1. Checkout
-      # --------------------------------------------------
+      # ==================================================
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
+      # ==================================================
       # 2. JDK 21
-      # --------------------------------------------------
+      # ==================================================
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -28,87 +28,164 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      # --------------------------------------------------
+      # ==================================================
       # 3. Android SDK
-      # --------------------------------------------------
+      # ==================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
 
-      # --------------------------------------------------
-      # 4. Install Android SDK components required by
-      #    Veliora
-      # --------------------------------------------------
-      - name: Install Android SDK 35
+      # ==================================================
+      # 4. Install Android SDK 35
+      # ==================================================
+      - name: Install Android SDK components
         run: |
           yes | sdkmanager --licenses > /dev/null || true
 
           sdkmanager \
+            "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "platform-tools"
+            "build-tools;35.0.0"
 
-      # --------------------------------------------------
-      # 5. Verify Java / Android environment
-      # --------------------------------------------------
+      # ==================================================
+      # 5. Gradle 8.10.2
+      # ==================================================
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+
+      # ==================================================
+      # 6. Verify environment
+      # ==================================================
       - name: Verify build environment
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
           echo "========================================"
           echo "Java"
           echo "========================================"
+
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
 
           echo
           echo "========================================"
-          echo "Android SDK"
+          echo "Android"
           echo "========================================"
+
           echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
           sdkmanager --version
+          adb version
+
+          echo
+          echo "========================================"
+          echo "Gradle"
+          echo "========================================"
+
+          gradle --version
 
           echo
           echo "========================================"
           echo "SDK packages"
           echo "========================================"
+
           sdkmanager --list_installed | grep -E \
             "platforms;android-35|build-tools;35.0.0|platform-tools" \
             || true
 
-      # --------------------------------------------------
-      # 6. Prepare environment expected by Veliora's
-      #    build-apk.sh
-      # --------------------------------------------------
-      - name: Prepare Veliora build environment
+      # ==================================================
+      # 7. Patch Veliora build script for Linux CI
+      #
+      # Veliora's build-apk.sh contains macOS-specific
+      # JDK detection and sed syntax.
+      # We patch only the temporary CI copy.
+      # ==================================================
+      - name: Patch build script for Linux CI
         run: |
-          echo "Preparing environment..."
+          python3 <<'PY'
+          from pathlib import Path
 
-          # Veliora's script expects ANDROID_HOME
-          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          path = Path("scripts/build-apk.sh")
+          text = path.read_text()
 
-          # Make Java explicitly available
-          export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
+          # ------------------------------------------------
+          # Fix JDK 21 detection
+          #
+          # Original script expects macOS:
+          # /usr/libexec/java_home -v 21
+          #
+          # GitHub Ubuntu runner uses JAVA_HOME.
+          # ------------------------------------------------
 
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          old = '''JAVA21_HOME=""
+          if JAVA21_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null)"; then'''
 
-          java -version
-          adb version
-          sdkmanager --version
+          new = '''JAVA21_HOME=""
+          if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+            JAVA21_HOME="$JAVA_HOME"
+          elif command -v java >/dev/null 2>&1 && java -version 2>&1 | grep -q '"21\\.'; then
+            JAVA_BIN="$(command -v java)"
+            JAVA_REAL="$(readlink -f "$JAVA_BIN")"
+            JAVA21_HOME="$(dirname "$(dirname "$JAVA_REAL")")"
+          elif command -v /usr/libexec/java_home >/dev/null 2>&1 && JAVA21_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null)"; then'''
 
-      # --------------------------------------------------
-      # 7. Make build script executable
-      # --------------------------------------------------
+          if old in text:
+              text = text.replace(old, new)
+              print("JDK detection patched.")
+          else:
+              print("JDK detection block not found; checking whether it was already patched.")
+
+          # ------------------------------------------------
+          # Fix macOS-only:
+          #
+          # sed -i '' ...
+          #
+          # Linux uses:
+          #
+          # sed -i ...
+          # ------------------------------------------------
+
+          text = text.replace(
+              "sed -i '' ",
+              "sed -i "
+          )
+
+          path.write_text(text)
+
+          print()
+          print("Patched scripts/build-apk.sh")
+          PY
+
+      # ==================================================
+      # 8. Show patched build script
+      # ==================================================
+      - name: Inspect build script
+        run: |
+          echo "========================================"
+          echo "JDK detection section"
+          echo "========================================"
+
+          sed -n '15,55p' scripts/build-apk.sh
+
+          echo
+          echo "========================================"
+          echo "Build script sections"
+          echo "========================================"
+
+          sed -n '55,125p' scripts/build-apk.sh
+
+      # ==================================================
+      # 9. Make script executable
+      # ==================================================
       - name: Make build script executable
         run: |
           chmod +x scripts/build-apk.sh
 
-      # --------------------------------------------------
-      # 8. Build APK
-      # --------------------------------------------------
+      # ==================================================
+      # 10. Build APK
+      # ==================================================
       - name: Build APK
         env:
           JAVA_HOME: ${{ env.JAVA_HOME }}
@@ -126,24 +203,30 @@ jobs:
 
           java -version
 
+          echo
+          echo "========================================"
+          echo "Running build script"
+          echo "========================================"
+
           ./scripts/build-apk.sh
 
-      # --------------------------------------------------
-      # 9. Show generated APK
-      # --------------------------------------------------
+      # ==================================================
+      # 11. Find generated APK
+      # ==================================================
       - name: Find APK
         run: |
           echo "========================================"
           echo "Generated APK files"
           echo "========================================"
 
-          find android -type f \
+          find . \
+            -type f \
             \( -name "*.apk" -o -name "*.aab" \) \
             -print
 
-      # --------------------------------------------------
-      # 10. Upload APK
-      # --------------------------------------------------
+      # ==================================================
+      # 12. Upload APK
+      # ==================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
