@@ -3,8 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// 自签名密钥由 scripts/build-apk.sh 首次构建时生成（不入库）
+// 自签名密钥由 scripts/build-apk.sh 生成（不入库）。
+// CI 里靠 GitHub Actions 缓存/Secret 复用同一把 key，否则每次构建都是新签名，
+// 覆盖安装会报签名不一致，必须先卸载。
 val localKeystore = rootProject.file("keystore/veliora.jks")
+
+// 版本号由构建脚本经 -PvelioraVersionCode / -PvelioraVersionName 传入；
+// 下面的默认值只是兜底（直接在 Android Studio 里点 Run 时会用到）。
+val velioraVersionCode = (project.findProperty("velioraVersionCode") as String?)?.toIntOrNull() ?: 4
+val velioraVersionName = (project.findProperty("velioraVersionName") as String?) ?: "1.0.1"
 
 android {
     namespace = "org.veliora.television"
@@ -14,9 +21,9 @@ android {
         applicationId = "org.veliora.television"
         minSdk = 26
         targetSdk = 35
-        // versionCode 只增不减：电视上已装过 versionCode 2 的包，回退会导致无法覆盖安装
-        versionCode = 4
-        versionName = "1.0.1"
+        // versionCode 只增不减：回退或长期不变会导致电视上无法覆盖安装
+        versionCode = velioraVersionCode
+        versionName = velioraVersionName
     }
 
     signingConfigs {

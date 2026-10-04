@@ -5,6 +5,8 @@ on:
 
 permissions:
   contents: read
+  # actions/cache 保存缓存需要 actions: write
+  actions: write
 
 jobs:
   build:
@@ -184,6 +186,29 @@ jobs:
           chmod +x scripts/build-apk.sh
 
       # ==================================================
+      # 9.5 稳定签名密钥：每次 CI 构建都在全新 runner 上跑，keystore
+      #     又不入库，脚本会每次生成新 key → 与已装 App 签名不一致，
+      #     只能先卸载才能安装。用 actions/cache 把第一次生成的
+      #     keystore 缓存下来，后续构建都复用同一把 key。
+      #     想彻底不依赖缓存，可把 keystore base64 后存成仓库 Secret
+      #     KEYSTORE_BASE64（见下方“Restore from secret”），脚本也会读它。
+      # ==================================================
+      - name: Restore signing keystore (cache, stable across builds)
+        uses: actions/cache@v4
+        with:
+          path: android/keystore
+          key: veliora-android-keystore-v1
+
+      - name: Restore keystore from secret (optional, permanent)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          mkdir -p android/keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/keystore/veliora.jks
+          echo "keystore restored from KEYSTORE_BASE64 secret"
+
+      # ==================================================
       # 10. Build APK
       # ==================================================
       - name: Build APK
@@ -235,4 +260,19 @@ jobs:
             android/app/build/outputs/apk/release/*.apk
             android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
+
+      # ==================================================
+      # 13. 备份本次使用的 keystore，方便把它存成 KEYSTORE_BASE64 secret
+      #     （缓存被 GitHub 清理时，secret 能让签名保持稳定，不必再卸载重装）
+      #     仓库已把 store/key 密码写死在 build.gradle.kts，密钥本就不保密；
+      #     若你不想公开该 artifact，删掉本步骤即可。
+      # ==================================================
+      - name: Upload signing keystore (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veliora-keystore
+          path: android/keystore/veliora.jks
+          if-no-files-found: ignore
           retention-days: 7
