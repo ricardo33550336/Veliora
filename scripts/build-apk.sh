@@ -86,19 +86,9 @@ done
 ok "密码门已中和（内部哈希: ${HASH:0:12}…）"
 
 # ---------------------------------------------------------------
-# 3. 签名 keystore（不入库）
-#    更新能否覆盖安装，取决于每次构建是否用同一把 key：
-#    - 本地：放在 android/keystore/，生成一次后一直复用；
-#    - CI：由 workflow 通过 actions/cache 复用，或从 KEYSTORE_BASE64 secret 恢复；
-#      没有缓存/secret 时才会生成新 key（新 key 与已装 App 签名不一致，只能先卸载）。
+# 3. 首次构建自动生成自签名 keystore（gitignore，不入库）
 # ---------------------------------------------------------------
 KEYSTORE="$ANDROID_DIR/keystore/veliora.jks"
-if [ ! -f "$KEYSTORE" ] && [ -n "${KEYSTORE_BASE64:-}" ]; then
-  info "从 KEYSTORE_BASE64 恢复签名密钥..."
-  mkdir -p "$(dirname "$KEYSTORE")"
-  printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
-  ok "keystore 已恢复: $KEYSTORE"
-fi
 if [ ! -f "$KEYSTORE" ]; then
   info "生成自签名 keystore（仅本机使用）..."
   mkdir -p "$(dirname "$KEYSTORE")"
@@ -107,24 +97,10 @@ if [ ! -f "$KEYSTORE" ]; then
     -alias veliora -keyalg RSA -keysize 2048 -validity 36500 \
     -dname "CN=Veliora, OU=Local, O=Veliora, C=CN" >/dev/null 2>&1
   ok "keystore 已生成: $KEYSTORE"
-  info "注意：新生成的 key 与旧安装包签名不同，第一次安装需先卸载旧版"
 fi
 
 # ---------------------------------------------------------------
-# 4. 计算版本号
-#    versionCode 用 Unix 分钟（单调递增、跨本地与 CI 都成立，且每次构建都不同）；
-#    versionName 用 package.json 版本 + 构建时间，在安装器里能一眼看出新旧。
-#    可用 VELIORA_VERSION_CODE / VELIORA_VERSION_NAME 覆盖。
-# ---------------------------------------------------------------
-PKG_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/package.json" | head -1)"
-[ -z "$PKG_VERSION" ] && PKG_VERSION="1.0.1"
-BUILD_CODE="${VELIORA_VERSION_CODE:-$(( $(date -u +%s) / 60 ))}"
-if [ "$BUILD_CODE" -lt 5 ]; then BUILD_CODE=5; fi
-BUILD_NAME="${VELIORA_VERSION_NAME:-${PKG_VERSION}.$(date -u +%Y%m%d%H%M)}"
-ok "版本: $BUILD_NAME (versionCode=$BUILD_CODE)"
-
-# ---------------------------------------------------------------
-# 5. Gradle 构建（首次自动下载 wrapper 与依赖）
+# 4. Gradle 构建（首次自动下载 wrapper 与依赖）
 # ---------------------------------------------------------------
 cd "$ANDROID_DIR"
 GRADLE_CMD="./gradlew"
@@ -144,14 +120,13 @@ if [ "${1:-}" = "--clean" ]; then
 fi
 
 info "开始构建 release APK（首次需下载依赖，请耐心等待）..."
-$GRADLE_CMD assembleRelease -PvelioraVersionCode="$BUILD_CODE" -PvelioraVersionName="$BUILD_NAME"
+$GRADLE_CMD assembleRelease
 
 APK="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
 if [ -f "$APK" ]; then
   ok "构建成功！"
   echo
   echo "  APK 位置: $APK"
-  echo "  版本:     $BUILD_NAME (versionCode=$BUILD_CODE)"
   echo "  大小:     $(du -h "$APK" | cut -f1)"
   echo
   echo "  安装到电视:"
