@@ -2455,34 +2455,67 @@
      * 取配置文本：Android 优先原生桥（浏览器 fetch 受同源策略限制，局域网静态
      * 服务器一般不带 CORS 头，会被拦成 Failed to fetch）；失败或网页版再回退 fetch。
      */
-    async function fetchConfigText(url) {
-        if (window.AndroidTV && typeof window.AndroidTV.fetchText === 'function') {
-            const text = await androidFetchText(url);
-            if (text) return text;
+    async function fetchConfigText(candidates) {
+        const errors = [];
+        const hasBridge = !!(window.AndroidTV && typeof window.AndroidTV.fetchText === 'function');
+        for (const url of candidates) {
+            if (hasBridge) {
+                const text = await androidFetchText(url);
+                if (text) return text;
+                errors.push(url + ' → 原生抓取无响应');
+            }
+            try {
+                const res = await fetch(url, { mode: 'cors', headers: { 'Accept': 'application/json' } });
+                if (res.ok) return await res.text();
+                errors.push(url + ' → HTTP ' + res.status);
+            } catch (e) {
+                errors.push(url + ' → ' + ((e && e.message) || e));
+            }
         }
-        const res = await fetch(url, { mode: 'cors', headers: { 'Accept': 'application/json' } });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.text();
+        const err = new Error(errors.join('；'));
+        err.hasBridge = hasBridge;
+        throw err;
+    }
+
+    /**
+     * 用户手输的地址容错：补协议；局域网静态服务器通常没证书，
+     * 若填了 https 也再补一个 http 试试（安卓 TV 上很常见）。
+     */
+    function configUrlCandidates(raw) {
+        const u = (raw || '').trim().replace(/^[\s"'<]+|[\s"'>]+$/g, '');
+        const list = [];
+        const push = (x) => { if (x && list.indexOf(x) < 0) list.push(x); };
+        if (/^https?:\/\//i.test(u)) {
+            push(u);
+            if (/^https:\/\//i.test(u)) push('http://' + u.slice(8));
+        } else {
+            push('http://' + u);
+            push('https://' + u);
+        }
+        return list;
     }
 
     async function importConfigFromUrl() {
-        const url = await promptGate.open('配置文件 URL', { charset: 'url' });
-        if (!url) return;
+        const raw = await promptGate.open('配置文件 URL', { charset: 'url' });
+        if (!raw) return;
+        const candidates = configUrlCandidates(raw);
         const gen = beginLoading('正在导入配置…');
         try {
-            const text = await fetchConfigText(url);
+            const text = await fetchConfigText(candidates);
             if (loadingCancelled(gen)) return;         // 取消了就不落盘，也不 reload
             let json;
             try { json = JSON.parse(text); }
             catch (e) { throw new Error('文件内容不是合法 JSON'); }
             await applyImportedConfig(json);
         } catch (e) {
-            const msg = (e && e.message) || '未知错误';
-            if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
-                // 网页版没原生桥时，服务器缺 CORS 头会走到这里
-                toast('导入失败：读不到该地址（网页版服务器需返回 Access-Control-Allow-Origin: *）');
+            console.warn('[Veliora] 导入配置失败：', e && e.message, '试过：', candidates);
+            const detail = ((e && e.message) || '未知错误');
+            if (!(e && e.hasBridge)) {
+                toast('导入失败：抓不到该地址（网页版受跨域限制；APK 请确认已装最新构建）');
+            } else if (/Failed to fetch|NetworkError|Load failed/i.test(detail)) {
+                toast('导入失败：跨域被拦截，文件服务器需返回 Access-Control-Allow-Origin: *');
             } else {
-                toast('导入失败：' + msg);
+                toast('导入失败：' + (detail.length > 68 ? detail.slice(0, 68) + '…' : detail));
             }
         } finally { hideLoading(); }
     }
