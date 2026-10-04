@@ -2429,19 +2429,61 @@
         setTimeout(() => window.location.reload(), 1500);
     }
 
+    // ---------- 配置导入：URL 抓取（Android 走原生桥绕开 CORS） ----------
+    const androidFetchPending = new Map();
+    // 原生抓完文本后回调这里；没有这个全局函数的旧 APK / 网页版自然回退 fetch
+    window.__velioraFetchText = function (id, text) {
+        const cb = androidFetchPending.get(id);
+        if (cb) cb(text || '');   // 删除/去重交给 done，这里不要先删，否则 done 里的判断会落空
+    };
+    function androidFetchText(url) {
+        return new Promise((resolve) => {
+            const id = 'f' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+            const done = (t) => {
+                if (!androidFetchPending.has(id)) return;   // 回调与超时只会resolve一次
+                androidFetchPending.delete(id);
+                resolve(t);
+            };
+            androidFetchPending.set(id, done);
+            try { window.AndroidTV.fetchText(url, id); }
+            catch (e) { done(''); }
+            setTimeout(() => done(''), 20000);   // 原生没回就放弃，别一直挂着
+        });
+    }
+
+    /**
+     * 取配置文本：Android 优先原生桥（浏览器 fetch 受同源策略限制，局域网静态
+     * 服务器一般不带 CORS 头，会被拦成 Failed to fetch）；失败或网页版再回退 fetch。
+     */
+    async function fetchConfigText(url) {
+        if (window.AndroidTV && typeof window.AndroidTV.fetchText === 'function') {
+            const text = await androidFetchText(url);
+            if (text) return text;
+        }
+        const res = await fetch(url, { mode: 'cors', headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.text();
+    }
+
     async function importConfigFromUrl() {
         const url = await promptGate.open('配置文件 URL', { charset: 'url' });
         if (!url) return;
         const gen = beginLoading('正在导入配置…');
         try {
-            const res = await fetch(url, { mode: 'cors', headers: { 'Accept': 'application/json' } });
+            const text = await fetchConfigText(url);
             if (loadingCancelled(gen)) return;         // 取消了就不落盘，也不 reload
-            if (!res.ok) throw new Error('获取配置文件失败');
-            const json = await res.json();
-            if (loadingCancelled(gen)) return;
+            let json;
+            try { json = JSON.parse(text); }
+            catch (e) { throw new Error('文件内容不是合法 JSON'); }
             await applyImportedConfig(json);
         } catch (e) {
-            toast('导入失败：' + e.message);
+            const msg = (e && e.message) || '未知错误';
+            if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+                // 网页版没原生桥时，服务器缺 CORS 头会走到这里
+                toast('导入失败：读不到该地址（网页版服务器需返回 Access-Control-Allow-Origin: *）');
+            } else {
+                toast('导入失败：' + msg);
+            }
         } finally { hideLoading(); }
     }
 

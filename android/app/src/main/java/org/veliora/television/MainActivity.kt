@@ -248,6 +248,21 @@ class MainActivity : Activity() {
                     ""
                 }
             }
+
+            /**
+             * 「从 URL 导入配置」用：浏览器 fetch 受同源策略(CORS)限制，局域网静态
+             * 服务器一般不带 CORS 头，会被直接拦掉（Failed to fetch）。走原生 OkHttp
+             * 抓文本，绕过 CORS；结果通过 window.__velioraFetchText(id, text) 异步回传。
+             */
+            @JavascriptInterface
+            fun fetchText(url: String, callbackId: String) {
+                Thread {
+                    val text = proxy.fetchText(url)
+                    val js = "window.__velioraFetchText && window.__velioraFetchText(" +
+                        JSONObject.quote(callbackId) + ", " + JSONObject.quote(text) + ");"
+                    runOnUiThread { webView.evaluateJavascript(js, null) }
+                }.start()
+            }
         }, "AndroidTV")
 
         // 「导入配置文件」用的是 <input type=file>；WebView 默认不弹系统文件选择器，

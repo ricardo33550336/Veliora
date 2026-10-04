@@ -95,6 +95,29 @@ class ProxyHandler {
         }
     }
 
+    /**
+     * 直接抓取文本（用于「从 URL 导入配置」）。
+     * 这里不复用 isValidUrl：那个内网拦截是给公网代理防 SSRF 的，而此处目标是用户
+     * 自己输入的地址（常是局域网静态服务器）。浏览器 fetch 会被 CORS 拦住，所以走原生。
+     * 失败返回空串。
+     */
+    fun fetchText(target: String): String {
+        if (!target.startsWith("http://") && !target.startsWith("https://")) return ""
+        return try {
+            val req = Request.Builder()
+                .url(target)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json, text/plain, */*")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) "" else resp.body?.string() ?: ""
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchText 失败: $target", e)
+            ""
+        }
+    }
+
     /** 对齐 server.mjs isValidUrl：仅 http/https，拦截本机与内网地址 */
     private fun isValidUrl(url: String): Boolean {
         val parsed = try {
