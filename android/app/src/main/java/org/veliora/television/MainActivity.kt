@@ -2,16 +2,22 @@ package org.veliora.television
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -22,6 +28,7 @@ import androidx.webkit.WebViewAssetLoader
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.File
 
 class MainActivity : Activity() {
 
@@ -29,6 +36,7 @@ class MainActivity : Activity() {
         private const val HOST = "appassets.androidplatform.net"
         private const val START_URL = "https://$HOST/index.html"
         private const val REQ_PLAYER = 1
+        private const val REQ_FILE_CHOOSER = 2
         private const val SHELL_PREFS = "veliora_shell"
         private const val KEY_PENDING_REPORT = "pendingReport"
 
@@ -71,6 +79,9 @@ class MainActivity : Activity() {
 
     // 拦截到的 player.html 完整地址，供原生播放失败时回退 WebView 播放器
     private var pendingPlayerUrl: String? = null
+
+    // 「导入配置文件」的系统文件选择器回调（WebView 的 <input type=file> 需要它）
+    private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
 
     // 原生播放器带回的「看到第几集 / 第几秒」。以前是 onActivityResult 里直接
     // evaluateJavascript 一次就算了，送不到就丢：电视内存小，原生播放器在前台时 WebView 的
@@ -198,11 +209,66 @@ class MainActivity : Activity() {
             }
         }
 
-        // JS 桥：页面在首页按返回键时通知原生退出
+        // JS 桥：返回键退出 + 导出配置落盘
+        // WebView 不会处理 blob: 下载，页面里的 <a download> 在电视上点了等于没反应，
+        // 所以「导出配置」走 saveTextFile 写真实文件。
         wv.addJavascriptInterface(object {
             @JavascriptInterface
             fun exitApp() = runOnUiThread { finish() }
+
+            /**
+             * 把文本保存到用户能找到的位置，返回展示用路径；失败返回空串。
+             * Android 10+ 写公共「下载」目录（免权限）；旧系统退回 App 外部目录
+             * （/sdcard/Android/data/<包名>/files/Download/，同样免权限）。
+             */
+            @JavascriptInterface
+            fun saveTextFile(fileName: String, content: String): String {
+                val safe = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    .ifBlank { "Veliora-Settings.json" }
+                return try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Downloads.DISPLAY_NAME, safe)
+                            put(MediaStore.Downloads.MIME_TYPE, "application/json")
+                            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                        }
+                        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                            ?: return ""
+                        contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+                            ?: return ""
+                        "下载/$safe"
+                    } else {
+                        val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+                        if (!dir.exists()) dir.mkdirs()
+                        val file = File(dir, safe)
+                        file.writeText(content, Charsets.UTF_8)
+                        file.absolutePath
+                    }
+                } catch (e: Exception) {
+                    ""
+                }
+            }
         }, "AndroidTV")
+
+        // 「导入配置文件」用的是 <input type=file>；WebView 默认不弹系统文件选择器，
+        // 必须由 onShowFileChooser 转成系统「选择文件」，否则电视上点导入毫无反应。
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView,
+                filePathCallback: ValueCallback<Array<Uri>>,
+                fileChooserParams: WebChromeClient.FileChooserParams
+            ): Boolean {
+                pendingFileCallback?.onReceiveValue(null)
+                pendingFileCallback = filePathCallback
+                return try {
+                    startActivityForResult(fileChooserParams.createIntent(), REQ_FILE_CHOOSER)
+                    true
+                } catch (e: Exception) {
+                    pendingFileCallback = null
+                    false
+                }
+            }
+        }
 
         return wv
     }
@@ -300,6 +366,13 @@ class MainActivity : Activity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            val cb = pendingFileCallback
+            pendingFileCallback = null
+            val uri = if (resultCode == RESULT_OK) data?.data else null
+            cb?.onReceiveValue(if (uri != null) arrayOf(uri) else null)
+            return
+        }
         if (requestCode == REQ_PLAYER && resultCode == PlayerActivity.RESULT_FALLBACK) {
             // 原生管线播不了的流，回退 WebView hls.js 播放器兜底
             pendingPlayerUrl?.let { webView.loadUrl(it) }

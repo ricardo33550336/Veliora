@@ -2396,16 +2396,27 @@
         const times = Date.now().toString();
         const config = { name: 'Veliora-Settings', time: times, cfgVer: '1.0.0', data: items };
         config.hash = await sha256Hex(JSON.stringify(config.data));
-        const blob = new Blob([JSON.stringify(config)], { type: 'text/plain;charset=utf-8' });
+        const fileName = 'Veliora-Settings_' + times + '.json';
+        const text = JSON.stringify(config);
+
+        // Android TV：WebView 不处理 blob: 下载，<a download> 点下去会被静默丢弃
+        // （以前只弹「已导出」但什么都没发生）。走原生桥写真实文件，并把路径提示出来。
+        if (window.AndroidTV && typeof window.AndroidTV.saveTextFile === 'function') {
+            let saved = '';
+            try { saved = window.AndroidTV.saveTextFile(fileName, text) || ''; } catch (e) {}
+            if (saved) { toast('配置已导出到：' + saved); return; }
+        }
+
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'Veliora-Settings_' + times + '.json';
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        toast('配置已导出');
+        toast('配置已导出（浏览器下载目录）');
     }
 
     async function applyImportedConfig(config) {
