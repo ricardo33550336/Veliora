@@ -99,7 +99,7 @@ img { -webkit-user-drag: none; }
 }
 /* 氛围底层：轻度虚化铺满，保证左侧文字区不发黑 */
 .tv-hero-bg {
-    position: absolute; inset: -4%; z-index: 0;
+    position: absolute; top: -4%; right: -4%; bottom: -4%; left: -4%; z-index: 0;
     background-size: cover; background-position: center 22%;
     /* 26px → 18px：这一层是全屏尺寸，模糊半径越大栅格化越贵，而且首页焦点每停一次
        就要换图重糊一遍。糊到这个程度视觉上已看不出区别 */
@@ -117,7 +117,7 @@ img { -webkit-user-drag: none; }
    底部这条的行程刻意拉长：纯底色只出现在最后 8%（已被首排卡片盖住），
    首排开始的位置（距底 ~17vh）压到 0.72 —— 图还透得出来，又够首排标题的对比度 */
 .tv-hero::after {
-    content: ""; position: absolute; inset: 0; z-index: 0;
+    content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 0;
     background:
         linear-gradient(to top, var(--bg) 8%, rgba(20,20,20,0.72) 20%, rgba(20,20,20,0.3) 34%, transparent 58%),
         linear-gradient(to right, rgba(20,20,20,0.9) 0%, rgba(20,20,20,0.4) 40%, transparent 65%);
@@ -164,7 +164,7 @@ img { -webkit-user-drag: none; }
        电视 GPU 上这是掉帧大头。焦点缩放交给 transform（合成器就能完成） */
 }
 .tv-tile .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.tv-tile .fallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 10px; font-size: 15px; color: var(--text-dim); background: linear-gradient(135deg, #333, #1a1a1a); }
+.tv-tile .fallback { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 10px; font-size: 15px; color: var(--text-dim); background: linear-gradient(135deg, #333, #1a1a1a); }
 /* 角标原来带 backdrop-filter: blur(4px)：屏上有几十个，每个都要回读背景再模糊，
    是电视上最贵的效果之一。12px 小字号看不出虚化差别，改用不透明度更高的纯色底 */
 .tv-tile .badge { position: absolute; top: 9px; left: 9px; background: rgba(0,0,0,0.78); color: var(--gold); font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 3px; }
@@ -192,7 +192,14 @@ img { -webkit-user-drag: none; }
 }
 
 /* ============================ 搜索 / 详情 / 发现 / 设置 ============================ */
-#viewSearch, #viewDetail, #viewDiscover, #viewSettings, #viewHistory { position: fixed; inset: 0; padding: 11vh 4.5vw 5vh; background: var(--bg); z-index: 30; overflow-y: auto; overflow-x: hidden; }
+#viewSearch, #viewDetail, #viewDiscover, #viewSettings, #viewHistory {
+    /* 不用 inset 简写：部分电视盒子内置 WebView 偏旧（Chrome < 87）不支持 inset，
+       会让这些固定层失去视口高度（scrollHeight == clientHeight），方向键就滚不动。
+       top/right/bottom/left 长写人人支持，效果一致。 */
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    padding: 11vh 4.5vw 5vh; background: var(--bg); z-index: 30;
+    overflow-y: auto; overflow-x: hidden;
+}
 #viewDiscover::-webkit-scrollbar, #viewSettings::-webkit-scrollbar, #viewHistory::-webkit-scrollbar { width: 0; height: 0; }
 #viewDiscover, #viewSettings, #viewHistory { scrollbar-width: none; }
 .search-head { display: flex; align-items: center; gap: 2vw; margin-bottom: 3.5vh; }
@@ -241,7 +248,7 @@ img { -webkit-user-drag: none; }
 /* ============================ 加载 / 提示 ============================ */
 .tv-spinner { width: 46px; height: 46px; border: 4px solid rgba(255,255,255,0.18); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.tv-center { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: rgba(0,0,0,0.9); backdrop-filter: blur(6px); }
+.tv-center { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 60; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: rgba(0,0,0,0.9); backdrop-filter: blur(6px); }
 /* search-box 的 flex:1 针对搜索页横向布局；在弹层纵向 flex 里会被拉伸成大空块，需还原 */
 .tv-center .search-box { flex: none; }
 .tv-center.hidden { display: none; }
@@ -268,8 +275,8 @@ img { -webkit-user-drag: none; }
 
 /* ============================ 继续观看卡片 ============================ */
 .tv-tile .thumb.cw { background: linear-gradient(135deg, #2c2c2c, #171717); }
-.thumb.cw .cw-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.cw-body { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 10% 9% 14%; gap: 5%; }
+.thumb.cw .cw-cover { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+.cw-body { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 10% 9% 14%; gap: 5%; }
 /* 有封面时文字压深色渐变，保证可读；meta 也提亮一档 */
 .thumb.cw.has-cover .cw-body { background: linear-gradient(180deg, rgba(0,0,0,0) 25%, rgba(0,0,0,0.55) 62%, rgba(0,0,0,0.9) 100%); }
 .thumb.cw.has-cover .cw-meta { color: #cfcfcf; }

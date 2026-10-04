@@ -195,11 +195,15 @@
     // 找到真正在滚的那个祖先容器（各视图自身滚动，发现/搜索页则可能是内层网格）
     function scrollBox(el) {
         let p = el.parentElement;
-        while (p && p !== document.body) {
+        while (p) {
+            if (p === document.body || p === document.documentElement) break;
             const oy = getComputedStyle(p).overflowY;
             if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 2) return p;
             p = p.parentElement;
         }
+        // 兜底：页面自身（body/html）在滚的情况，scrollBox 的前提是能找到带 overflow 的元素
+        const se = document.scrollingElement || document.documentElement;
+        if (se && se.scrollHeight > se.clientHeight + 2) return se;
         return null;
     }
 
@@ -235,10 +239,19 @@
         const margin = window.innerHeight * 0.12;
         if (vr.top >= margin && vr.bottom <= window.innerHeight - margin) return;
         const box = scrollBox(el);
-        if (!box) return;
-        // 把元素滚到容器垂直居中
-        const br = box.getBoundingClientRect();
-        smoothScrollTo(box, box.scrollTop + (vr.top - br.top) - (box.clientHeight - vr.height) / 2);
+        if (box) {
+            // 把元素滚到容器垂直居中
+            const br = box.getBoundingClientRect();
+            smoothScrollTo(box, box.scrollTop + (vr.top - br.top) - (box.clientHeight - vr.height) / 2);
+            return;
+        }
+        // 兜底：手写 scrollBox 找不到容器时交给引擎自己找。部分电视盒子 WebView 对
+        // position:fixed 层的 overflowY / scrollHeight 判定有偏差（拿不到视口高度时
+        // scrollHeight == clientHeight），scrollBox 会返回 null，导致方向键能移动焦点
+        // 但页面不滚。scrollIntoView 走的是引擎原生“找最近可滚祖先”的逻辑，能兜住。
+        if (typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        }
     }
 
     // 排的左边界、可视宽、内容总宽在这一排建好之后就不再变，但 scrollWidth / clientWidth /
