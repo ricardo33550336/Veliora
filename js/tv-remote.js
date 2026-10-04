@@ -2045,9 +2045,14 @@
     function renderSettings() {
         renderSrcChips();
         renderCustomChips();
+        renderSubChips();
         renderToggleChips();
         renderDataChips();
     }
+
+    // 订阅源与手工源都落在 customAPIs，用 subscriptionId 区分：
+    // 「自定义源」区只管手工源，订阅源在「TVBOX 订阅」区单独管理。
+    function isManualCustom(api) { return !api || !api.subscriptionId; }
 
     function renderSrcChips() {
         const sel = new Set(getSelected());
@@ -2097,6 +2102,7 @@
         const sel = new Set(getSelected());
         const customs = getCustomAPIs();
         customs.forEach((api, i) => {
+            if (!isManualCustom(api)) return;   // 订阅源在「TVBOX 订阅」区渲染
             const key = 'custom_' + i;
             box.appendChild(chipBtn(
                 api.name + (api.isAdult ? ' ⚠18+' : ''),
@@ -2112,13 +2118,14 @@
                 customDelMode ? 'close' : (sel.has(key) ? 'check' : null)));
         });
         box.appendChild(chipBtn('添加自定义源', addCustomSource, null, 'add'));
-        if (customs.length) {
+        const manualCount = customs.filter(isManualCustom).length;
+        if (manualCount) {
             box.appendChild(chipBtn(customDelMode ? '完成' : '删除源', () => {
                 customDelMode = !customDelMode;
                 renderCustomChips();
                 setTimeout(() => setFocus(document.querySelector('#customChips .chip')), 60);
             }, customDelMode ? 'warn' : '', customDelMode ? 'check' : 'del'));
-        } else if (!customs.length && !customDelMode) {
+        } else if (!manualCount && !customDelMode) {
             const hint = document.createElement('span');
             hint.className = 'chips-label';
             hint.textContent = '未添加自定义源';
@@ -2128,7 +2135,8 @@
 
     async function addCustomSource() {
         const max = (typeof CUSTOM_API_CONFIG !== 'undefined' && CUSTOM_API_CONFIG.maxSources) || 5;
-        if (getCustomAPIs().length >= max) { toast(`最多支持 ${max} 个自定义源`); return; }
+        // 订阅导入的源不占用手工源名额
+        if (getCustomAPIs().filter(isManualCustom).length >= max) { toast(`最多支持 ${max} 个自定义源`); return; }
         const name = await promptGate.open('自定义源名称');
         if (!name) return;
         let url = await promptGate.open('API 地址（如 https://example.com/api.php/provide/vod）', { charset: 'url' });
@@ -2166,6 +2174,139 @@
         if (!apis.length) customDelMode = false;
         renderSettings();
         setTimeout(() => setFocus(document.querySelector('#customChips .chip')), 60);
+    }
+
+    // ---------- TVBOX 订阅（订阅层：解析/缓存/自动刷新都在 js/subscription.js） ----------
+    function fmtDateTime(ts) {
+        if (!ts) return '从未';
+        const d = new Date(ts);
+        const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    function subLabel(sub) {
+        return sub.name || (() => { try { return new URL(sub.url).hostname; } catch (e) { return sub.url; } })();
+    }
+
+    function renderSubChips() {
+        const box = document.getElementById('subChips');
+        if (!box) return;
+        const V = window.VelioraSubscriptions;
+        if (!V) {
+            box.innerHTML = '<span class="chips-label">订阅模块未加载</span>';
+            return;
+        }
+        box.innerHTML = '';
+        const subs = V.getSubscriptions();
+        if (!subs.length) {
+            const hint = document.createElement('span');
+            hint.className = 'chips-label';
+            hint.textContent = '未添加 TVBOX 订阅';
+            box.appendChild(hint);
+        }
+
+        subs.forEach(sub => {
+            const refreshing = V.isRefreshing(sub.id);
+            const label = document.createElement('span');
+            label.className = 'chips-label';
+            label.textContent = subLabel(sub);
+            box.appendChild(label);
+
+            box.appendChild(chipBtn(sub.enabled === false ? '已停用' : '已启用', () => {
+                V.setEnabled(sub.id, sub.enabled === false);
+                renderSubChips();
+                setTimeout(() => setFocus(document.querySelector('#subChips .chip')), 60);
+            }, sub.enabled === false ? 'warn' : 'on', sub.enabled === false ? 'close' : 'check'));
+
+            box.appendChild(chipBtn(refreshing ? '正在刷新…' : '立即刷新', () => refreshSubscriptionFlow(sub.id),
+                refreshing ? 'disabled' : '', refreshing ? null : 'upload'));
+
+            box.appendChild(chipBtn('删除订阅', async () => {
+                const ok = await optGate.open(`确定删除订阅「${subLabel(sub)}」？`, [
+                    { text: '取消', value: null },
+                    { text: '删除', value: true, cls: 'warn' },
+                ]);
+                if (!ok) return;
+                V.removeSubscription(sub.id);
+                toast('订阅已删除，手工源不受影响');
+                renderSubChips();
+                setTimeout(() => setFocus(document.querySelector('#subChips .chip')), 60);
+            }, 'warn', 'del'));
+
+            const status = document.createElement('span');
+            status.className = 'chips-label';
+            status.style.flexBasis = '100%';
+            let text = `最后刷新：${fmtDateTime(sub.lastRefreshAt)}`;
+            if (sub.lastSuccessAt) text += ` ・ 最后成功：${fmtDateTime(sub.lastSuccessAt)}`;
+            if (sub.counts && typeof sub.counts.imported === 'number' && window.VelioraTVBox) {
+                text += ' ・ ' + window.VelioraTVBox.describeStats(sub.counts);
+            } else if (sub.counts && typeof sub.counts.imported === 'number') {
+                text += ` ・ 导入 ${sub.counts.imported} 个可用源`;
+            }
+            if (sub.lastError) text += ` ・ 失败：${sub.lastError}`;
+            status.textContent = text;
+            box.appendChild(status);
+
+            // 该订阅当前导入的源（可单独启用/停用，不影响手工源）
+            V.getSubscriptionSources(sub.id).forEach(src => {
+                const el = chipBtn(src.name + (src.isAdult ? ' ⚠18+' : ''), null,
+                    src.selected ? 'on' : '', src.selected ? 'check' : null);
+                el.onclick = () => {
+                    const cur = getSelected();
+                    const on = cur.includes(src.key);
+                    setSelected(on ? cur.filter(k => k !== src.key) : cur.concat(src.key));
+                    syncYellowFilterWithAdult();
+                    el.classList.toggle('on', !on);
+                    el.innerHTML = (on ? '' : icon('check')) + ' ' + esc(src.name + (src.isAdult ? ' ⚠18+' : ''));
+                    renderSrcCount();
+                };
+                box.appendChild(el);
+            });
+        });
+
+        box.appendChild(chipBtn('添加订阅', addSubscriptionFlow, null, 'add'));
+    }
+
+    function renderSrcCount() {
+        const el = document.getElementById('srcCount');
+        if (el) el.textContent = `（已选 ${getSources().length} 个）`;
+    }
+
+    async function addSubscriptionFlow() {
+        const V = window.VelioraSubscriptions;
+        if (!V) { toast('订阅模块未加载'); return; }
+        const url = await promptGate.open('TVBOX 订阅地址（如 …/tvbox.json）', { charset: 'url' });
+        if (!url) return;
+        let sub;
+        try {
+            sub = V.addSubscription(url);
+        } catch (e) {
+            toast('添加失败：' + e.message);
+            return;
+        }
+        await refreshSubscriptionFlow(sub.id, true);
+    }
+
+    async function refreshSubscriptionFlow(id, isNew) {
+        const V = window.VelioraSubscriptions;
+        if (!V) { toast('订阅模块未加载'); return; }
+        if (V.isRefreshing(id)) { toast('正在刷新，请稍候…'); return; }
+        const gen = beginLoading(isNew ? '正在导入订阅…' : '正在刷新订阅…');
+        renderSubChips();
+        try {
+            const r = await V.refreshSubscription(id, { manual: true });
+            if (loadingCancelled(gen)) return;
+            const stats = r && r.stats;
+            let msg = `刷新成功，共导入 ${r.imported} 个可用源`;
+            if (stats && stats.skipped) msg += `，跳过 ${stats.skipped} 个不支持/无效的条目`;
+            toast(msg);
+        } catch (e) {
+            if (loadingCancelled(gen)) return;
+            toast('刷新失败，已保留上次成功的数据');
+        } finally {
+            hideLoading();
+            renderSubChips();
+        }
     }
 
     function renderToggleChips() {
@@ -2233,7 +2374,8 @@
     async function exportConfig() {
         const items = {};
         ['selectedAPIs', 'customAPIs', 'yellowFilterEnabled', 'adFilteringEnabled',
-         'doubanEnabled', 'hasInitializedDefaults', 'viewingHistory', SEARCH_HISTORY_KEY]
+         'doubanEnabled', 'hasInitializedDefaults', 'viewingHistory', SEARCH_HISTORY_KEY,
+         'veliora_subscriptions_v1', 'veliora_subscription_cache_v1']
             .forEach(key => {
                 const v = localStorage.getItem(key);
                 if (v !== null) items[key] = v;
@@ -2319,11 +2461,14 @@
     const pwGate = {
         active: false,
         value: '',
+        upper: false,
         onKey() {},
         open() {
             if (!window.isPasswordProtected || !isPasswordProtected()) return;
             if (isPasswordVerified && isPasswordVerified()) return;
             this.active = true;
+            this.value = '';
+            this.upper = false;
             const c = document.getElementById('loading');
             overlayEl = c;
             c.classList.remove('hidden');
@@ -2331,6 +2476,7 @@
                 <div style="font-size:1.6vw;font-weight:800">需要访问密码</div>
                 <div class="search-box" id="pwBox" style="min-width:40vw;text-align:center">
                     <span class="cursor">|</span></div>
+                <div class="msg" style="font-size:1vw">遥控器软键盘 / 键盘直接输入 · ABC 键切换大小写</div>
                 <div class="tv-keyboard" id="pwKb" style="max-width:60vw"></div>`;
             buildPwKeyboard();
             setTimeout(() => setFocus(document.querySelector('#pwKb .key')), 50);
@@ -2341,8 +2487,15 @@
                     case 'ArrowLeft': e.preventDefault(); navigate('left'); break;
                     case 'ArrowRight': e.preventDefault(); navigate('right'); break;
                     case 'Enter': e.preventDefault(); if (current) current.click(); break;
-                    case 'Backspace': case 'Escape':
+                    case 'Backspace': case 'Escape': case 'GoBack': case 'BrowserBack':
                         e.preventDefault(); this.value = this.value.slice(0, -1); this.render(); break;
+                    default:
+                        // 物理键盘/蓝牙遥控可直接输入，密码大小写敏感，不做任何转换
+                        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                            e.preventDefault();
+                            this.value += e.key;
+                            this.render();
+                        }
                 }
             };
         },
@@ -2361,20 +2514,34 @@
                 c.innerHTML = LOADING_HTML;   // 还原 spinner 结构，showLoading 才有 #loadingMsg 可用
                 toast('验证成功');
                 boot();
-            } else { this.value = ''; this.render(); toast('密码错误'); }
+            } else { this.value = ''; this.render(); toast('密码错误（密码区分大小写，可用 ABC 键切换）'); }
         }
     };
     function buildPwKeyboard() {
         const kb = document.getElementById('pwKb');
+        if (!kb) return;
         kb.innerHTML = '';
-        [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'].forEach(k => {
+        // 字母按当前大小写状态输入；此前固定 toLowerCase()，导致大写密码永远登不上（ABC123 只能输成 abc123）
+        [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].forEach(ch => {
+            const label = pwGate.upper ? ch : ch.toLowerCase();
             const el = document.createElement('div');
             el.className = 'key focusable';
-            el.textContent = k;
-            el.onclick = () => { pwGate.value += k.toLowerCase(); pwGate.render(); };
-            // 允许大小写：默认小写，长按无意义；密码多为小写/数字，够用
+            el.textContent = label;
+            el.onclick = () => { pwGate.value += label; pwGate.render(); };
             kb.appendChild(el);
         });
+        [...'0123456789'].forEach(d => {
+            const el = document.createElement('div');
+            el.className = 'key focusable';
+            el.textContent = d;
+            el.onclick = () => { pwGate.value += d; pwGate.render(); };
+            kb.appendChild(el);
+        });
+        kb.appendChild(keyBtn(pwGate.upper ? 'abc' : 'ABC', 'key focusable', () => {
+            pwGate.upper = !pwGate.upper;
+            buildPwKeyboard();
+            setTimeout(() => setFocus(document.querySelector('#pwKb .key')), 30);
+        }));
         kb.appendChild(keyBtn('', 'key focusable', () => { pwGate.value = pwGate.value.slice(0, -1); pwGate.render(); }, 'backspace'));
         kb.appendChild(keyBtn('确定', 'key focusable wide act', () => pwGate.submit(), 'check'));
     }
@@ -2476,6 +2643,10 @@
         buildKeyboard();
         renderQuery();
         bindImportFile();
+        // 订阅层：先用缓存同步恢复源列表（不阻塞），再后台刷新；订阅异常不影响启动
+        if (window.VelioraSubscriptions) {
+            window.VelioraSubscriptions.init({ onChange: renderSubChips });
+        }
         const orderBtn = document.getElementById('btnEpOrder');
         if (orderBtn) orderBtn.onclick = toggleEpisodeOrder;
         const copyBtn = document.getElementById('btnCopyLinks');
