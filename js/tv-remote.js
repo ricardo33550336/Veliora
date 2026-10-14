@@ -49,6 +49,30 @@
         return d ? `<svg class="mi" viewBox="0 0 24 24"><path d="${d}"/></svg>` : '';
     }
 
+    // ---------- 清晰度（方案 A：从 vod_remarks 自由文本里“猜”）----------
+    // 注意：这是不可靠的启发式 —— 很多源的备注只有“更新至12集”，猜不出清晰度；
+    // 命中才显示，猜不出就不显示。可靠做法（探测 m3u8 主播放列表的 RESOLUTION）见 TODO.md。
+    const QUALITY_ORDER = ['4K', '1080P', '720P', '480P'];
+    const QUALITY_RULES = [
+        { re: /2160[pP]|\b4K\b|\bUHD\b|超高清/, label: '4K' },
+        { re: /1080[pP]|\bFHD\b|全高清|蓝光|Blu-?Ray|\bBD\b|超清/, label: '1080P' },
+        { re: /720[pP]|\bHD\b|高清/, label: '720P' },
+        { re: /480[pP]|标清/, label: '480P' },
+    ];
+    function extractQuality(remarks) {
+        const s = String(remarks == null ? '' : remarks);
+        if (!s) return '';
+        for (const r of QUALITY_RULES) if (r.re.test(s)) return r.label;
+        return '';
+    }
+    // 同一部片多个源时，取最高的那个清晰度做徽章
+    function bestQualityOf(items) {
+        for (const label of QUALITY_ORDER) {
+            if ((items || []).some(it => extractQuality(it.vod_remarks) === label)) return label;
+        }
+        return '';
+    }
+
     // ---------- 本地存储门面（键名/格式与主项目完全一致） ----------
     const store = {
         get(k, d) {
@@ -385,6 +409,9 @@
 
     // restoreFocus: 返回时要落回的焦点，不给就用各页默认焦点
     function showView(name, restoreFocus) {
+        // 离开搜索/详情页：停掉仍在飞的请求，别再占着同源连接做无用功
+        if (name !== 'search' && searchAbort) { searchAbort.abort(); searchAbort = null; }
+        if (name !== 'detail' && detailAbort) { detailAbort.abort(); detailAbort = null; }
         state.view = name;
         document.querySelectorAll('.tv-view').forEach(v => v.classList.remove('active'));
         const map = { home: 'viewHome', discover: 'viewDiscover', search: 'viewSearch', detail: 'viewDetail', settings: 'viewSettings', history: 'viewHistory' };
@@ -1183,6 +1210,9 @@
         return { primary: ranked.slice(0, 1), fallback: [...ranked.slice(1, 3), raw] };
     }
 
+    // 全局硬截止：到点就不再等剩下的源，已到的结果照常显示（流式渲染的意义就在这）
+    const SEARCH_HARD_DEADLINE = ((typeof SEARCH_TIMEOUT === 'number' ? SEARCH_TIMEOUT : 6000) + 1500);
+
     async function runSearch() {
         // 拼音没选完就按搜索：已有中文就按中文搜，否则把拼音当字母输入去联想
         if (pyBuf) { state.query = typedQuery(); pyBuf = ''; renderQuery(); }
@@ -1192,6 +1222,36 @@
         if (!getSources().length) { toast('没有可用采集源，请到「设置」中选择'); return; }
         // gen：搜索期间用户按返回取消的话，后到的结果一律丢弃，不再把结果页顶出来
         const gen = beginLoading(hasCJK(raw) ? '搜索中…' : '正在联想片名…');
+        // 真正取消上一轮在飞的请求，释放同源连接；只丢弃结果是不够的
+        if (searchAbort) searchAbort.abort();
+        const ctrl = new AbortController();
+        searchAbort = ctrl;
+        const signal = ctrl.signal;
+        const hardStop = setTimeout(() => ctrl.abort(), SEARCH_HARD_DEADLINE);
+
+        // 流式累加器：哪个源先回就先渲染，不再等最慢的源
+        const acc = new Map();
+        let used = [raw];
+        let rendered = false;
+        let renderTimer = null;
+        const onBatch = (items) => {
+            if (loadingCancelled(gen) || signal.aborted) return;
+            items.forEach(it => acc.set((it.source_code || '') + '|' + (it.vod_id || it.vod_name || ''), it));
+            if (!renderTimer) renderTimer = setTimeout(flush, 120);
+        };
+        function flush() {
+            renderTimer = null;
+            if (loadingCancelled(gen) || signal.aborted || !acc.size) return;
+            // 用户已在结果里浏览：不在他脚下重排，免得焦点丢失
+            if (rendered && focusInResults()) return;
+            const cjk = used.filter(hasCJK);
+            renderSearchResults(mergeResults([[...acc.values()]], cjk[0] || raw), cjk, { focus: !rendered });
+            if (!rendered) {
+                rendered = true;
+                if (loadingGate.active) hideLoading();   // 首批结果一到就撤遮罩，先让用户看东西
+            }
+        }
+
         try {
             const { primary, fallback } = await buildSearchQueries(raw);
             if (loadingCancelled(gen)) return;
@@ -1201,34 +1261,42 @@
                 renderSuggestChips(titles);   // 猜错时可直接点别的候选
             }
 
-            let used = primary;
-            let list = await searchQueries(primary, gen);
+            used = primary;
+            await searchQueries(primary, gen, signal, onBatch);
             if (loadingCancelled(gen)) return;
-            if (!list.length && fallback.length) {     // 首选候选搜空了，再试次级候选
+            // 硬截止触发了就别再跑 fallback，直接拿已有结果收尾
+            if (!signal.aborted && !acc.size && fallback.length) {     // 首选候选搜空了，再试次级候选
                 used = fallback;
-                list = await searchQueries(fallback, gen);
+                await searchQueries(fallback, gen, signal, onBatch);
                 if (loadingCancelled(gen)) return;
             }
+
+            // 用户已离开搜索页（返回）时不要再往隐藏的视图里渲染/抢焦点
+            if (loadingCancelled(gen) || state.view !== 'search') return;
+            if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+            const cjk = used.filter(hasCJK);
+            const finalList = mergeResults([[...acc.values()]], cjk[0] || raw);
             // 只记真搜到东西的关键词，且记中文片名而不是 QYN 这种字母串，
             // 否则历史里全是联想歪了的词，点一次还是空
-            if (list.length) saveSearchHistory(used.filter(hasCJK)[0] || raw);
-            renderSearchResults(list, used.filter(hasCJK));
+            if (finalList.length) saveSearchHistory(cjk[0] || raw);
+            if (!rendered || !focusInResults()) renderSearchResults(finalList, cjk, { focus: !rendered });
         } catch (e) {
             toast('搜索失败：' + e.message);
         } finally {
+            clearTimeout(hardStop);
             hideLoading();
             // 这一轮搜完了：下次敲字自动从头开始，不再往这个词后面接
             queryCommitted = true;
         }
     }
 
-    async function searchQueries(queries, gen) {
+    async function searchQueries(queries, gen, signal, onBatch) {
         const cn = queries.filter(hasCJK);
         // 已被取消就别把遮罩重新亮起来
         if (gen === undefined || !loadingCancelled(gen)) {
             showLoading(cn.length ? '搜索「' + cn.join('、') + '」…' : '搜索中…');
         }
-        const lists = await Promise.all(queries.map(q => searchAll(q).catch(() => [])));
+        const lists = await Promise.all(queries.map(q => searchAll(q, signal, onBatch).catch(() => [])));
         return mergeResults(lists, cn[0] || queries[0]);
     }
 
@@ -1269,18 +1337,28 @@
         });
     }
 
-    // 复用主项目 searchByAPIAndKeyWord（js/search.js：支持自定义源与多页抓取），多源合并
-    async function searchAll(query) {
-        const sources = getSources();
-        if (!sources.length) throw new Error('没有可用采集源，请到「设置」中选择');
-        const results = await Promise.all(sources.map(src =>
-            searchByAPIAndKeyWord(src, query).catch(() => [])));
-        let all = applyYellowFilter(results.flat());
-        // 与上游一致：按片名、来源排序，方便同名结果聚在一起
-        all.sort((a, b) =>
-            (a.vod_name || '').localeCompare(b.vod_name || '') ||
-            (a.source_name || '').localeCompare(b.source_name || ''));
-        return all;
+    // 用户是否已经把焦点挪进了结果网格：是的话流式更新就别在他脚下重排（会让焦点丢失）
+    const focusInResults = () => !!(current && current.closest && current.closest('#searchResults'));
+
+    // 复用主项目 searchByAPIAndKeyWord（js/search.js：支持自定义源与多页抓取），多源合并。
+    // onBatch：每个源一回来就把它拿到的条目送出去（流式渲染），不再等最慢的源。
+    async function searchAll(query, signal, onBatch) {
+        // 正在冷却的源直接跳过，连请求都不发。
+        // 安全阀：若健康源一个不剩（多半是本机断网导致集体误判），就全部放行，
+        // 别让一次网络抖动把用户锁在“无可用源”里 5 分钟。
+        let sources = getSources();
+        if (window.sourceHealth) {
+            const healthy = sources.filter(src => window.sourceHealth.isSourceAvailable(src));
+            if (healthy.length) sources = healthy;
+        }
+        if (!sources.length) return [];
+        const results = await Promise.all(sources.map(async src => {
+            const list = await searchByAPIAndKeyWord(src, query, signal).catch(() => []);
+            const usable = applyYellowFilter(list);
+            if (usable.length && onBatch) onBatch(usable);
+            return usable;
+        }));
+        return results.flat();
     }
 
     // ---------- 搜索历史（videoSearchHistory，与主项目 ui.js 同键同格式） ----------
@@ -1336,7 +1414,8 @@
         return el;
     }
 
-    function renderSearchResults(list, guessed) {
+    // opts.focus === false：流式更新的后续批次，不要抢焦点
+    function renderSearchResults(list, guessed, opts) {
         const box = document.getElementById('searchResults');
         box.innerHTML = '';
         if (!list.length) {
@@ -1370,18 +1449,25 @@
             tile.className = 'tv-tile portrait focusable';
             const title = (rep.vod_name || '').replace(/"/g, '&quot;');
             const badge = items.length > 1 ? items.length + ' 个源' : (rep.source_name || '');
+            const quality = bestQualityOf(items);
+            const subParts = [];
+            if (quality) subParts.push(`<span class="q-badge">${quality}</span>`);
+            if (rep.vod_remarks) subParts.push(esc(rep.vod_remarks));
+            const sub = subParts.join(' ');
             tile.innerHTML = `
                 <div class="thumb">
                     <img src="${proxyImg(rep.vod_pic)}" loading="lazy"
                          onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';this.parentElement.classList.add('noimg');">
                     <div class="fallback" style="display:none">${title}</div>
                     <div class="badge" style="color:#9cc2ff">${badge}</div>
-                    <div class="cap"><div class="cap-title">${title}</div>${rep.vod_remarks ? `<div class="cap-sub">${esc(rep.vod_remarks)}</div>` : ''}</div>
+                    <div class="cap"><div class="cap-title">${title}</div>${sub ? `<div class="cap-sub">${sub}</div>` : ''}</div>
                 </div>`;
             tile.onclick = () => openDetail(items, 0);
             box.appendChild(tile);
         });
-        setTimeout(() => setFocus(box.querySelector('.tv-tile')), 50);
+        if (!opts || opts.focus !== false) {
+            setTimeout(() => setFocus(box.querySelector('.tv-tile')), 50);
+        }
     }
 
     // ============================================================
@@ -1409,6 +1495,10 @@
         goView('detail');
 
         const token = ++detailToken;
+        // 换一部片子就真正中止上一轮的按标题搜索，别再让旧请求占连接
+        if (detailAbort) detailAbort.abort();
+        detailAbort = new AbortController();
+        const signal = detailAbort.signal;
         state.detail = {
             results: [], selectedIdx: -1,
             doubanCover: hdCover(cover) || '',
@@ -1428,7 +1518,7 @@
         renderSourceTabs();
 
         sources.forEach(src => {
-            searchByAPIAndKeyWord(src, title).catch(() => []).then(list => {
+            searchByAPIAndKeyWord(src, title, signal).catch(() => []).then(list => {
                 if (token !== detailToken) return;   // 已打开其他详情或离开
                 const d = state.detail;
                 if (d.waitFor === src) d.waitFor = '';   // 想等的那个源已经有结论了（有结果或没结果）
@@ -1475,6 +1565,7 @@
     // results: 同一影片的多个源结果，作为「播放源」切换（搜索结果页入口）
     async function openDetail(results, idx, doubanCover) {
         detailToken++;   // 使仍在进行的按标题搜索失效
+        if (detailAbort) { detailAbort.abort(); detailAbort = null; }   // 从搜索结果进来：停掉按标题搜索
         state.detail = { results, selectedIdx: idx, doubanCover: doubanCover || '', pendingSources: [], fuzzy: [],
                          resumeIndex: -1, preferSource: '', waitFor: '' };
         goView('detail');
@@ -1490,10 +1581,14 @@
             const t = document.createElement('div');
             const on = i === selectedIdx;
             t.className = 'source-tab focusable' + (on ? ' selected' : '');
-            const label = (r.source_name || '源' + (i + 1)) + (r.vod_remarks ? ' · ' + r.vod_remarks : '');
+            const base = r.source_name || '源' + (i + 1);
+            const quality = extractQuality(r.vod_remarks);
+            const label = esc(base)
+                + (quality ? ` <span class="q-badge">${quality}</span>` : '')
+                + (r.vod_remarks ? ' · ' + esc(r.vod_remarks) : '');
             // 选中的那个带播放图标：提示「再按一次 OK 就开播」
-            if (on) t.innerHTML = icon('play') + ' ' + esc(label);
-            else t.textContent = label;
+            if (on) t.innerHTML = icon('play') + ' ' + label;
+            else t.innerHTML = label;
             t.onclick = () => {
                 // 已选中的源再按一次 OK 就直接开播；原来会重新拉一遍同一个源的剧集，
                 // 界面上看着像没反应（详情页打开后焦点默认就停在这里）
@@ -2370,6 +2465,11 @@
             renderSearchHistoryChips();
             toast('搜索历史已清空');
         }, 'warn', 'del'));
+        // 某些源被短时网络抖动误判进冷却后，用户可一键恢复，不用等 5 分钟
+        box.appendChild(chipBtn('重置采集源健康状态', () => {
+            if (window.sourceHealth) window.sourceHealth.resetSourceHealth();
+            toast('已重置，下次搜索会重试全部采集源');
+        }, 'warn', 'del'));
         box.appendChild(chipBtn('导出配置', exportConfig, null, 'download'));
         box.appendChild(chipBtn('从 URL 导入配置', importConfigFromUrl, null, 'upload'));
         box.appendChild(chipBtn('导入配置文件', () => {
@@ -2650,9 +2750,22 @@
             return true;   // 其余键一律吞掉：遮罩盖着时不该操作底下的界面
         }
     };
-    function beginLoading(msg) { showLoading(msg); return loadingGate.token; }
+    // 本轮搜索/详情在飞的请求控制器：取消或换关键词时真正 abort 掉，
+    // 否则旧请求会继续占着同源连接（只有 ~6 条），新一轮只能排队
+    let searchAbort = null;
+    let detailAbort = null;
+    function beginLoading(msg) {
+        loadingGate.token++;   // 新的一轮开始即作废旧一轮，旧结果回来一对号就被丢弃
+        showLoading(msg);
+        return loadingGate.token;
+    }
     function loadingCancelled(gen) { return gen !== loadingGate.token; }
-    function cancelLoading() { loadingGate.token++; hideLoading(); }
+    function cancelLoading() {
+        loadingGate.token++;
+        if (searchAbort) { searchAbort.abort(); searchAbort = null; }
+        if (detailAbort) { detailAbort.abort(); detailAbort = null; }
+        hideLoading();
+    }
 
     const LOADING_HTML = '<div class="tv-spinner"></div><div class="msg" id="loadingMsg">加载中…</div>';
     function showLoading(msg) {

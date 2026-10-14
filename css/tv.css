@@ -175,6 +175,11 @@ img { -webkit-user-drag: none; }
 .tv-tile .cap-title { font-size: clamp(12px,0.95vw,16px); font-weight: 700; line-height: 1.3; color: #fff; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
 .tv-tile .cap-sub { margin-top: 0.15em; font-size: clamp(10px,0.8vw,13px); color: #cfcfcf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tv-tile .thumb.noimg .cap { display: none; }
+/* 清晰度徽章（方案 A：从备注文字里猜出来的，命中才显示） */
+.q-badge { display: inline-block; padding: 0 0.45em; border-radius: 3px; background: rgba(245,197,24,0.18); color: var(--gold); font-size: 0.9em; font-weight: 700; line-height: 1.5; letter-spacing: 0.02em; }
+/* 源标签上底色会变（默认/选中/焦点），徽章跟着继承文字色，避免糊成一片 */
+.source-tab .q-badge { background: rgba(0,0,0,0.18); color: inherit; }
+.source-tab.selected .q-badge, .source-tab.focused .q-badge { background: rgba(255,255,255,0.25); color: inherit; }
 
 /* ====== 焦点态：大幅放大 + 白边（Netflix 经典聚焦） ====== */
 .focusable { outline: none; }

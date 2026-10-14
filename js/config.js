@@ -43,7 +43,8 @@ window.extendAPISites = extendAPISites;
 // 添加聚合搜索的配置选项
 const AGGREGATED_SEARCH_CONFIG = {
     enabled: true,             // 是否启用聚合搜索
-    timeout: 8000,            // 单个源超时时间（毫秒）
+    timeout: 8000,            // 单个源超时时间（毫秒）。有流式渲染后，慢源不再阻塞首屏，
+                              // 所以给足时间，别把 4~8s 才回的正常源误判为坏源
     maxResults: 10000,          // 最大结果数量
     parallelRequests: true,   // 是否并行请求所有源
     showSourceBadges: true    // 是否显示来源徽章
@@ -55,9 +56,10 @@ const API_CONFIG = {
         // 只拼接参数部分，不再包含 /api.php/provide/vod/
         path: '?ac=videolist&wd=',
         pagePath: '?ac=videolist&wd={query}&pg={page}',
-        // 最大获取页数。每页 20 条，5 页=100 条/源已远超一次搜索需要；
-        // 取 50 时一次宽泛搜索会对单个源发几十个分页请求，电视端（多源 × 多联想关键词）直接卡死
-        maxPages: 5,
+        // 最大获取页数。每页 20 条，1 页就够首屏用；取 5 时一次搜索会对每个源
+        // 多发 4 个分页请求（多源 × 多关键词 = 上百个请求，挤在同源 6 条连接上直接卡几分钟）。
+        // 真有需要再按结果数懒加载下一页，别默认开。
+        maxPages: 1,
         // 这些头发给的是本站 /proxy/，不是采集源；UA 伪装由代理侧负责，
         // 而且 fetch 的 User-Agent 是 forbidden header，写了也会被浏览器丢弃
         headers: {
