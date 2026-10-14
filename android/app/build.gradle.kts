@@ -15,8 +15,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // versionCode 只增不减：电视上已装过 versionCode 2 的包，回退会导致无法覆盖安装
-        versionCode = 4
-        versionName = "1.0.1"
+        versionCode = 5
+        versionName = "1.0.2"
     }
 
     signingConfigs {
