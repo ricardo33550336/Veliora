@@ -2,77 +2,31 @@
 
 按优先级排列。已完成项见 git 记录；文末「已完成 / 已知限制」只记录现状，不是待办。
 
-## P0 统一 Serverless 代理（与 server.mjs 对齐）— 已实现，待部署验证
-
-**原问题**：仓库里有 4 套服务端代理 + 1 套 Android 原生代理，只有 `server.mjs` 和
-`ProxyHandler.kt` 有重试/总预算/熔断/并发控制。另外三套 Serverless 版用 `response.text()`
-读上游，会破坏海报二进制；没有豆瓣 Referer；还会把多码率 master 改成单码率。
-
-**已做**：
-
-- 新增 `lib/proxy-core.mjs`：Web 标准 API（fetch / AbortController / crypto.subtle），
-  Node 18+ 与 Cloudflare Workers 共用。
-- 行为对齐 `server.mjs`：UA 伪装、豆瓣图床 Referer、单次超时 + 总预算、只重试瞬时错误、
-  host 熔断（含半开）、上游并发上限、敏感头过滤、二进制原样透传、m3u8 不改写。
-- `api/proxy/[...path].mjs`（Vercel）、`netlify/functions/proxy.mjs`、
-  `functions/proxy/[[path]].js`（Cloudflare）改为薄适配层，只负责解析路径/鉴权参数、
-  把 `Uint8Array` 转成各平台响应。
-- 本地测试已固化：`npm test`（`test/proxy-core.test.mjs` / `test/proxy-adapters.test.mjs`），
-  覆盖二进制字节一致、JSON 透传、401、503 重试、403 熔断、读体超时、豆瓣 Referer、
-  SSRF 拦截、三套适配器 + OPTIONS。
-- `package.json` 移除已不再使用的 `node-fetch`，声明 `engines.node >= 18`。
-
-**剩余**：
-
-- [ ] 在 Vercel / Netlify / Cloudflare 各实际部署一次，验证豆瓣海报、JSON、m3u8 字节一致。
-- [ ] 观察 Serverless 冷启动 + 平台 10s 上限下，`REQUEST_TOTAL_TIMEOUT=10000` 是否够用。
-- [ ] 已知差异：Serverless 的 host 熔断/并发上限是**实例级**（冷启动重置），与 `server.mjs`
-  的进程级不完全等价；要跨实例共享需接 KV/Redis。
-
-## P1 详情页源标签增量更新（修焦点丢失）— 已修复
-
-**原现象**：详情页各源并行返回，每返回一个就 `addDetailResults → renderSourceTabs`
-（`js/tv-remote.js:1639`、`:1668`），而 `renderSourceTabs` 每次 `tabs.innerHTML = ''`
-全量重建（`:1682`）。用户此时若停在某个源标签上，焦点节点被删除，下一次按键会
-重新落到页面首个可聚焦元素。
-
-**已做**：重建前记录焦点 tab 的 `data-source-code` 与原序号，重建后按 source_code 恢复
-`setFocus`；找不到时按原序号回退。焦点在剧集网格时不干预。
-
-**验收**：连续返回多个源时，焦点停在原 tab 上不跳；按 OK 仍直接切源/开播。
-
-> 方案 B（清晰度探测）依赖此项，现在可以上了。
-
-## P1 APK 构建验证与版本对齐
+## P1 APK 构建验证
 
 `ProxyHandler.kt` 已按 `server.mjs` 策略移植：总预算 10s、连接 5s / 读 8s、
 只重试瞬时且秒失败的错误、host 熔断（含半开）、客户端断开即 cancel 上游、
 连接池复用、上游并发上限、错误体与前端 `isHardSourceFailure` 对齐。
 
-**但尚未验证编译**（本机无 JDK / Android SDK）。CI 的 `.github/workflows/build-apk.yml`
-目前只有 `workflow_dispatch`，不会自动跑。
+本机没有 JDK / Android SDK，尚未验证编译。CI 的 `.github/workflows/build-apk.yml`
+只有 `workflow_dispatch`，需要手动触发。
 
 - [ ] 手动触发一次 `Build Veliora APK`，确认能出包。
 - [ ] 装到电视上冒烟：搜索、详情、切源、原生播放、网页播放器兜底、代理重试/熔断。
 - [x] `versionCode` 5 → 6（只增不减，避免无法覆盖安装）。
 - [x] `versionName` 与 `package.json` 对齐（1.1.0）。
 
-## P2 清晰度探测（方案 B）— 详情页已实现
+## P2 清晰度探测实机验证
 
-**现状**：`loadEpisodes()` 拿到 `data.episodes` 后，仅当 `episodes[0]` 是 http(s) 的 m3u8
-时才异步探测；只探当前选中的 1 个源。
+详情页已实现方案 B：`loadEpisodes()` 拿到 `episodes[0]` 后，仅当它是 http(s) 的 m3u8
+时才通过 `/proxy/` 拉 master playlist，解析 `#EXT-X-STREAM-INF` 的 `RESOLUTION`：
 
-**已做**：
+- 多档 → `1080P / 720P / 480P（3 档）`
+- 单档 → `1080P`
+- 只有 `#EXTINF` 的媒体列表 → 返回空，回退到方案 A（`vod_remarks` 猜测）
 
-- 通过 `/proxy/` 拉 master playlist（带鉴权参数），解析 `#EXT-X-STREAM-INF` 的
-  `RESOLUTION=WxH`：多档显示 `1080P / 720P / 480P（3 档）`，单档显示 `1080P`，
-  只有 `#EXTINF` 的媒体列表返回空、回退到方案 A（`vod_remarks` 猜测）。
-- 4s 超时；`AbortController` 在切源/离开详情时取消；`detailToken` 防串台。
-- 按 m3u8 URL 缓存 10 分钟（上限 100 条），失败静默、不记源健康失败。
-- 结果只改选中 tab 的 `innerHTML`，不整排重绘，焦点不丢。
-- 探测结果优先于 `vod_remarks` 猜测。
-
-**剩余**：
+已做：4s 超时、切源/离开详情 abort、`detailToken` 防串台、URL 缓存 10 分钟（上限 100 条）、
+失败静默、只改选中 tab 不整排重绘。
 
 - [ ] 实机验证若干真实源，观察单码率占比与徽章长度是否影响 tab 布局。
 - [ ] 网页兜底播放器（`js/player.js` + hls.js）监听 `LEVEL_SWITCHED` 叠当前分辨率
@@ -115,23 +69,32 @@
 - 缓冲后必须重设 `content-length`，移除 `content-encoding`。
 - 注意代理目前是 `responseType: 'stream'` 直接管道，做缓存必须整体缓冲响应体。
 
-## 工程卫生 — 本轮已处理
+## 工程卫生
 
 - [x] 版本号对齐：Android `versionCode=6` / `versionName=1.1.0`，
   `js/config.js` 的 `SITE_CONFIG.version` 同步为 1.1.0。
 - [x] `.codegraph/` 加入 `.gitignore`。
-- [x] `scripts/start.sh` 可执行位已生效（待提交）。
+- [x] `scripts/start.sh` 可执行位已提交。
 - [x] `Dockerfile` 的 `REQUEST_TIMEOUT` 改回 8000，并补齐
   `REQUEST_TOTAL_TIMEOUT` / `MAX_UPSTREAM_CONCURRENCY` / `BREAKER_*`。
-
-**仍可做**：把版本号收敛为单一来源（构建时从 `package.json` 注入 `versionName`），
-`SITE_CONFIG.version` 目前仍未在 UI 中使用，可删或接入。
+- [ ] 把版本号收敛为单一来源（构建时从 `package.json` 注入 `versionName`）。
+- [ ] `SITE_CONFIG.version` 仍未在 UI 中使用，可删或接入。
 
 ## 已完成 / 已知限制
 
 ### 已完成
 
-- **清晰度徽章方案 A**：从 `vod_remarks` 正则猜清晰度，搜索卡片与详情页源标签显示。
+- **代理实现收敛（方案 B）**：删除 Vercel / Netlify / Cloudflare 入口
+  （`api/`、`functions/`、`netlify/`、`middleware.js`、`vercel.json`、`netlify.toml`）
+  及配套的 `lib/proxy-core.mjs` / `test/`，只保留 `server.mjs` + Android `ProxyHandler.kt`。
+  前端 `/proxy/` 约定不变；`package.json` 移除未使用的 `node-fetch`。
+  如需恢复 Serverless 支持，可从 git 历史 `700b7bd` 取回（含二进制/豆瓣 Referer 修复）。
+- **详情页源标签焦点修复**：流式返回多个源时，重建前记录 `data-source-code` 与原序号，
+  重建后恢复焦点；焦点在剧集网格时不干预。
+- **清晰度探测方案 B**：详情页选中源探测 m3u8 master playlist，多档/单档显示，
+  4s 超时、可取消、URL 缓存 10 分钟、失败静默。
+- **清晰度徽章方案 A**：从 `vod_remarks` 正则猜清晰度，搜索卡片与详情页源标签显示；
+  探测失败时作为回退。
 - **搜索提速与稳定性**：单源单页抓取、只重试瞬时错误、断开即中止上游、源级熔断、
   结果流式渲染。
 - **Android 代理同步 `server.mjs` 策略**：重试分类 / 总预算 / host 熔断 / 断开即取消 /
@@ -145,3 +108,5 @@
   取消（只能靠 `callTimeout` 兜底）；只有**传输响应体**阶段能靠
   `CancelOnCloseInputStream` 关闭流时 `call.cancel()`。彻底可取消需要改成真正的本地
   HTTP 服务（类似 `server.mjs` 的 socket 级取消），属于更大改动。
+- Serverless 入口已移除；如果以后重新加回，需要重新处理：二进制 `arrayBuffer()` 透传、
+  豆瓣图床 Referer、m3u8 不改写、重试/熔断/并发限制。
