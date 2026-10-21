@@ -17,7 +17,7 @@ const SITE_CONFIG = {
     url: 'https://github.com/Z-wwwwww/Veliora',
     description: '免费影视聚合 Android TV 应用（基于 LibreTV）',
     logo: 'image/logo.png',
-    version: '1.0.3'
+    version: '1.1.0'
 };
 
 // API站点配置

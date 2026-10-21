@@ -412,6 +412,7 @@
         // 离开搜索/详情页：停掉仍在飞的请求，别再占着同源连接做无用功
         if (name !== 'search' && searchAbort) { searchAbort.abort(); searchAbort = null; }
         if (name !== 'detail' && detailAbort) { detailAbort.abort(); detailAbort = null; }
+        if (name !== 'detail' && state.view === 'detail') abortQualityProbe();
         state.view = name;
         document.querySelectorAll('.tv-view').forEach(v => v.classList.remove('active'));
         const map = { home: 'viewHome', discover: 'viewDiscover', search: 'viewSearch', detail: 'viewDetail', settings: 'viewSettings', history: 'viewHistory' };
@@ -1481,6 +1482,98 @@
         return (window.API_SITES && window.API_SITES[code] && window.API_SITES[code].name) || code;
     }
 
+    // ---------- 清晰度探测（方案 B：读 m3u8 主播放列表的 RESOLUTION）----------
+    // 只探当前选中源的第一个 m3u8，异步、可取消、失败静默；按 URL 缓存 10 分钟。
+    // 聚合源里单码率占多数，探不到就继续用 vod_remarks 的猜测结果。
+    const QUALITY_PROBE_TTL = 10 * 60 * 1000;
+    const QUALITY_PROBE_TIMEOUT = 4000;
+    const qualityProbeCache = new Map();   // url -> { label, ts }
+    let qualityProbeCtrl = null;
+
+    function abortQualityProbe() {
+        if (qualityProbeCtrl) {
+            try { qualityProbeCtrl.abort(); } catch (e) {}
+            qualityProbeCtrl = null;
+        }
+    }
+
+    function parseQualityFromMaster(text) {
+        const s = String(text || '');
+        if (!s || !/#EXT-X-STREAM-INF/i.test(s)) return '';
+        const heights = new Set();
+        const re = /#EXT-X-STREAM-INF:([^\r\n]+)/gi;
+        let m;
+        while ((m = re.exec(s))) {
+            const res = /(?:^|,)\s*RESOLUTION=(\d+)x(\d+)/i.exec(m[1]);
+            const h = res ? parseInt(res[2], 10) : 0;
+            if (h > 0) heights.add(h);
+        }
+        if (!heights.size) return '';
+        const labels = [...heights]
+            .sort((a, b) => b - a)
+            .map(h => h >= 2160 ? '4K' : h + 'P');
+        return labels.length === 1
+            ? labels[0]
+            : labels.join(' / ') + `（${labels.length} 档）`;
+    }
+
+    function qualityOf(r) {
+        const probed = state.detail && state.detail.probeQuality
+            ? state.detail.probeQuality[r.source_code || ''] : '';
+        return probed || extractQuality(r.vod_remarks);
+    }
+
+    function sourceTabHtml(r, quality, on, index) {
+        const base = r.source_name || '源' + (index + 1);
+        const label = esc(base)
+            + (quality ? ` <span class="q-badge">${quality}</span>` : '')
+            + (r.vod_remarks ? ' · ' + esc(r.vod_remarks) : '');
+        // 选中的那个带播放图标：提示「再按一次 OK 就开播」
+        return (on ? icon('play') + ' ' : '') + label;
+    }
+
+    // 只改选中 tab 的 innerHTML，不重绘整排（否则焦点会丢）
+    function applyProbedQuality(sourceCode, label, token) {
+        if (token !== detailToken || !state.detail) return;
+        const idx = state.detail.selectedIdx;
+        const r = state.detail.results[idx];
+        if (!r || (r.source_code || '') !== (sourceCode || '')) return;
+        state.detail.probeQuality = state.detail.probeQuality || {};
+        state.detail.probeQuality[sourceCode || ''] = label;
+        const tab = document.querySelector('#sourceTabs .source-tab.selected');
+        if (tab) tab.innerHTML = sourceTabHtml(r, label, true, idx);
+    }
+
+    async function probeQuality(url, sourceCode, token) {
+        if (!/^https?:\/\//i.test(url) || !/\.m3u8(?:[?#]|$)/i.test(url)) return;
+        const hit = qualityProbeCache.get(url);
+        if (hit && Date.now() - hit.ts < QUALITY_PROBE_TTL) {
+            if (hit.label) applyProbedQuality(sourceCode, hit.label, token);
+            return;
+        }
+        abortQualityProbe();
+        const ctrl = new AbortController();
+        qualityProbeCtrl = ctrl;
+        const timer = setTimeout(() => ctrl.abort(), QUALITY_PROBE_TIMEOUT);
+        try {
+            // 直连会被 CORS 挡，必须走 /proxy/（带鉴权参数）
+            const proxied = await withProxyAuth(PROXY_URL + encodeURIComponent(url));
+            const res = await fetch(proxied, { signal: ctrl.signal });
+            if (!res.ok) return;
+            const label = parseQualityFromMaster(await res.text());
+            if (qualityProbeCache.size >= 100) {
+                qualityProbeCache.delete(qualityProbeCache.keys().next().value);
+            }
+            qualityProbeCache.set(url, { label, ts: Date.now() });
+            if (label) applyProbedQuality(sourceCode, label, token);
+        } catch (e) {
+            // 失败静默：保留 vod_remarks 的猜测结果
+        } finally {
+            clearTimeout(timer);
+            if (qualityProbeCtrl === ctrl) qualityProbeCtrl = null;
+        }
+    }
+
     // 通过标题搜索后进入详情（用于豆瓣卡片）；cover 为豆瓣封面，详情页优先复用其高清版
     // 立即进入详情页：每个源先显示灰色加载中药丸，各自搜索完成后变为可选，无结果则移除
     let detailToken = 0;
@@ -1495,6 +1588,7 @@
         goView('detail');
 
         const token = ++detailToken;
+        abortQualityProbe();
         // 换一部片子就真正中止上一轮的按标题搜索，别再让旧请求占连接
         if (detailAbort) detailAbort.abort();
         detailAbort = new AbortController();
@@ -1507,6 +1601,7 @@
             resumeIndex: typeof resumeIndex === 'number' ? resumeIndex : -1,
             preferSource: (preferSource && sources.includes(preferSource)) ? preferSource : '',
             waitFor: (preferSource && sources.includes(preferSource)) ? preferSource : '',
+            probeQuality: {},   // source_code -> 探测到的清晰度标签
         };
         // 先用豆瓣信息占位，剧集区等首个源返回后填充
         document.getElementById('detailPoster').src = proxyImg(hdCover(cover) || '');
@@ -1565,9 +1660,10 @@
     // results: 同一影片的多个源结果，作为「播放源」切换（搜索结果页入口）
     async function openDetail(results, idx, doubanCover) {
         detailToken++;   // 使仍在进行的按标题搜索失效
+        abortQualityProbe();
         if (detailAbort) { detailAbort.abort(); detailAbort = null; }   // 从搜索结果进来：停掉按标题搜索
         state.detail = { results, selectedIdx: idx, doubanCover: doubanCover || '', pendingSources: [], fuzzy: [],
-                         resumeIndex: -1, preferSource: '', waitFor: '' };
+                         resumeIndex: -1, preferSource: '', waitFor: '', probeQuality: {} };
         goView('detail');
         renderSourceTabs();
         await loadEpisodes(idx);
@@ -1576,19 +1672,20 @@
     function renderSourceTabs() {
         const tabs = document.getElementById('sourceTabs');
         const { results, selectedIdx, pendingSources } = state.detail;
+        // 各源是流式返回的，每回一个都会重建 tab。若焦点正停在某个源标签上，
+        // 必须先记下它，重建后按 source_code 放回去，否则焦点节点被删、
+        // 下一次按键会跳到页面首个可聚焦元素。
+        const focusedTab = current && current.isConnected && tabs.contains(current) ? current : null;
+        const focusedCode = focusedTab ? (focusedTab.dataset.sourceCode || '') : null;
+        const focusedIndex = focusedTab
+            ? [...tabs.querySelectorAll('.source-tab')].indexOf(focusedTab) : -1;
         tabs.innerHTML = '';
         results.forEach((r, i) => {
             const t = document.createElement('div');
             const on = i === selectedIdx;
             t.className = 'source-tab focusable' + (on ? ' selected' : '');
-            const base = r.source_name || '源' + (i + 1);
-            const quality = extractQuality(r.vod_remarks);
-            const label = esc(base)
-                + (quality ? ` <span class="q-badge">${quality}</span>` : '')
-                + (r.vod_remarks ? ' · ' + esc(r.vod_remarks) : '');
-            // 选中的那个带播放图标：提示「再按一次 OK 就开播」
-            if (on) t.innerHTML = icon('play') + ' ' + label;
-            else t.innerHTML = label;
+            t.dataset.sourceCode = r.source_code || '';
+            t.innerHTML = sourceTabHtml(r, qualityOf(r), on, i);
             t.onclick = () => {
                 // 已选中的源再按一次 OK 就直接开播；原来会重新拉一遍同一个源的剧集，
                 // 界面上看着像没反应（详情页打开后焦点默认就停在这里）
@@ -1606,11 +1703,19 @@
             t.textContent = name;
             tabs.appendChild(t);
         });
+        // 焦点原在源标签区：重建后放回同一个源（找不到就按原序号回退）
+        if (focusedTab) {
+            const now = [...tabs.querySelectorAll('.source-tab')];
+            const again = (focusedCode && now.find(el => el.dataset.sourceCode === focusedCode))
+                || now[focusedIndex];
+            if (again) setFocus(again, false);
+        }
     }
 
     async function loadEpisodes(idx) {
         const r = state.detail.results[idx];
         const token = detailToken;
+        abortQualityProbe();   // 切源/重载剧集：上一轮的探测立即作废
         const wrap = document.getElementById('episodes');
         wrap.innerHTML = `<div style="grid-column:1/-1;color:var(--text-dim)">加载剧集…</div>`;
         try {
@@ -1643,6 +1748,7 @@
                 (info.desc || '').replace(/<[^>]+>/g, '') || '暂无简介';
 
             renderEpisodes(episodes, r);
+            if (episodes.length) probeQuality(episodes[0], r.source_code || '', token);
         } catch (e) {
             if (token === detailToken && state.detail.selectedIdx === idx) {
                 wrap.innerHTML = `<div style="grid-column:1/-1;color:var(--text-dim)">剧集加载失败</div>`;
