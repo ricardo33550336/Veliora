@@ -2,7 +2,7 @@
 
 按优先级排列。已完成项见 git 记录；文末「已完成 / 已知限制」只记录现状，不是待办。
 
-## P0 统一 Serverless 代理（与 server.mjs 对齐）— 已实现，待部署验证
+## P0 统一代理核心（server.mjs + Serverless）— 已完成
 
 **原问题**：仓库里有 4 套服务端代理 + 1 套 Android 原生代理，只有 `server.mjs` 和
 `ProxyHandler.kt` 有重试/总预算/熔断/并发控制。另外三套 Serverless 版用 `response.text()`
@@ -12,19 +12,24 @@
 
 - 新增 `lib/proxy-core.mjs`：Web 标准 API（fetch / AbortController / crypto.subtle），
   Node 18+ 与 Cloudflare Workers 共用。
-- 行为对齐 `server.mjs`：UA 伪装、豆瓣图床 Referer、单次超时 + 总预算、只重试瞬时错误、
+- 行为对齐原 `server.mjs`：UA 伪装、豆瓣图床 Referer、单次超时 + 总预算、只重试瞬时错误、
   host 熔断（含半开）、上游并发上限、敏感头过滤、二进制原样透传、m3u8 不改写。
+- `server.mjs` 的 `/proxy/` 也改用这个核心，删除 axios / http(s) Agent / 重复的熔断与
+  重试代码；`server.mjs` 从 427 行降到 138 行。
+- **豆瓣图床的 EdgeOne 人机校验**：axios 会拿到 `200 + HTML 挑战页`（表现为图片空响应），
+  fetch 能正常拿到 JPEG；统一用 fetch 后本地实测该豆瓣 URL 返回 200 + `image/jpeg`。
 - `api/proxy/[...path].mjs`（Vercel）、`netlify/functions/proxy.mjs`、
   `functions/proxy/[[path]].js`（Cloudflare）改为薄适配层，只负责解析路径/鉴权参数、
   把 `Uint8Array` 转成各平台响应。
 - 本地测试已固化：`npm test`（`test/proxy-core.test.mjs` / `test/proxy-adapters.test.mjs`），
   覆盖二进制字节一致、JSON 透传、401、503 重试、403 熔断、读体超时、豆瓣 Referer、
   SSRF 拦截、三套适配器 + OPTIONS。
-- `package.json` 移除已不再使用的 `node-fetch`，声明 `engines.node >= 18`。
+- `package.json` 移除不再使用的 `node-fetch` 和 `axios`，声明 `engines.node >= 18`。
 
 **剩余**：
 
-- [ ] 在 Vercel / Netlify / Cloudflare 各实际部署一次，验证豆瓣海报、JSON、m3u8 字节一致。
+- [ ] 在 Vercel / Netlify / Cloudflare 各实际部署一次，验证豆瓣海报、JSON、m3u8 字节一致
+  （如果不用 Serverless 可忽略）。
 - [ ] 观察 Serverless 冷启动 + 平台 10s 上限下，`REQUEST_TOTAL_TIMEOUT=10000` 是否够用。
 - [ ] 已知差异：Serverless 的 host 熔断/并发上限是**实例级**（冷启动重置），与 `server.mjs`
   的进程级不完全等价；要跨实例共享需接 KV/Redis。
