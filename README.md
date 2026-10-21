@@ -114,14 +114,9 @@ scripts\stop.bat
 
 源的选择与合法性由使用者自行负责。
 
-### 公网部署（可选，仅 Node / Docker）
+### 公网部署（可选）
 
-本仓库只保留 `server.mjs` 这一套服务端实现：`npm start`（或 `scripts/start.sh`）直接运行，
-也可以 `docker compose up -d`。公网部署时**必须设置 `PASSWORD` 环境变量**，密码门与代理
-鉴权将正常生效，避免向不特定公众开放。
-
-APK 用户无需部署后端：Android 内置 `ProxyHandler.kt` 提供同样的 `/proxy/` 端点。
-Vercel / Netlify / Cloudflare 等 Serverless 入口已移除。
+保留了上游的全部部署能力（Vercel / Netlify / Cloudflare / Docker），方法见 [LibreSpark/LibreTV 部署文档](https://github.com/LibreSpark/LibreTV#-快速部署)。公网部署时**必须设置 `PASSWORD` 环境变量**，密码门与代理鉴权将正常生效，避免向不特定公众开放。
 
 ## 📁 项目结构
 
@@ -158,7 +153,7 @@ Vercel / Netlify / Cloudflare 等 Serverless 入口已移除。
 
 - 前端：HTML5 + CSS3 + JavaScript（ES6+）、Tailwind CSS、HLS.js
 - Android：Kotlin、WebView（WebViewAssetLoader）、Media3 ExoPlayer
-- 服务端（自托管时）：Node.js（`server.mjs` 提供 `/proxy/` 与密码门）
+- 服务端（Web 部署时）：Node.js / Serverless Functions HLS 代理
 
 ## 🔄 与上游的关系
 

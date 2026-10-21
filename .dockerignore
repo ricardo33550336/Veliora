@@ -1,9 +1,12 @@
 .github/
 node_modules/
+netlify*
 .gitignore
 .dockerignore
 .env*
 nodemon.json
+vercel.json
 Dockerfile*
 docker-compose*.yml
 .docker/
+test/
