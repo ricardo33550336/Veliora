@@ -24,8 +24,7 @@
 
 **待验证**（本机无 JDK / Android SDK，只能靠 CI 出包）：
 
-- [ ] 手动触发 `Build Veliora APK`，确认 `PlaybackPrefetch` / `PrefetchDataSource` / 新增的
-      `DefaultLoadControl` 编译通过。
+- [x] 手动触发 `Build Veliora APK`：编译通过，产出 `veliora-apk`（约 5.7MB，run 41843095966）。
 - [ ] 电视上对比：同一部片（多码率源 + 单码率源）起播耗时、切集耗时、
       返回前台（重建播放器）耗时。
 - [ ] 确认起播缓冲降到 1 秒后，弱网下不会出现「出画面即卡」；若明显变差，把
@@ -92,10 +91,10 @@
 **但尚未验证编译**（本机无 JDK / Android SDK）。CI 的 `.github/workflows/build-apk.yml`
 目前只有 `workflow_dispatch`，不会自动跑。
 
-- [ ] 手动触发一次 `Build Veliora APK`，确认能出包。
+- [x] 手动触发一次 `Build Veliora APK`，确认能出包。
 - [ ] 装到电视上冒烟：搜索、详情、切源、原生播放、网页播放器兜底、代理重试/熔断。
-- [x] `versionCode` 5 → 6（只增不减，避免无法覆盖安装）。
-- [x] `versionName` 与 `package.json` 对齐（1.1.0）。
+- [x] `versionCode` 只增不减（5 → 6 → 7），避免无法覆盖安装。
+- [x] `versionName` 与 `package.json` 对齐（1.1.1）。
 
 ## P2 清晰度探测（方案 B）— 详情页已实现
 
