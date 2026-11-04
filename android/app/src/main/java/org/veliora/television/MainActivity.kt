@@ -217,6 +217,16 @@ class MainActivity : Activity() {
             fun exitApp() = runOnUiThread { finish() }
 
             /**
+             * 起播预热：页面在跳 player.html 前把 m3u8 播放列表提前交给原生拉好，
+             * 播放器打开同一地址时直接命中内存（详见 PlaybackPrefetch）。
+             * 挂在 JavaBridge 线程上，只会往单线程 executor 丢一个任务，不阻塞页面。
+             */
+            @JavascriptInterface
+            fun warmup(url: String) {
+                PlaybackPrefetch.warm(url)
+            }
+
+            /**
              * 把文本保存到用户能找到的位置，返回展示用路径；失败返回空串。
              * Android 10+ 写公共「下载」目录（免权限）；旧系统退回 App 外部目录
              * （/sdcard/Android/data/<包名>/files/Download/，同样免权限）。
@@ -332,6 +342,8 @@ class MainActivity : Activity() {
         pendingPlayerUrl = uri.toString()
         val videoUrl = uri.getQueryParameter("url").orEmpty()
         if (videoUrl.isBlank()) return
+        // 兜底预热：正常路径页面已经调过 AndroidTV.warmup()，这里再补一次（旧页面缓存 / 直达 player.html）
+        PlaybackPrefetch.warm(videoUrl)
         val title = uri.getQueryParameter("title").orEmpty()
         val indexParam = uri.getQueryParameter("index")?.toIntOrNull() ?: 0
         val positionSec = uri.getQueryParameter("position")?.toIntOrNull() ?: 0

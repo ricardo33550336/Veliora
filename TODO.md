@@ -2,6 +2,41 @@
 
 按优先级排列。已完成项见 git 记录；文末「已完成 / 已知限制」只记录现状，不是待办。
 
+## P0 起播 / 切集提速 — 已实现，待实机验证
+
+**原来的等待**：点 OK → 起 Activity → ExoPlayer 发请求，master playlist + 子 playlist 两段
+往返（各含 DNS/TCP/TLS）+ 默认起播缓冲 2.5 秒。多码率源上起播白等 0.5~1.5 秒很常见。
+
+**已做**：
+
+- 新增 `PlaybackPrefetch.kt`：进程内播放列表缓存（最多 8 条 / 单条 1MB / TTL 45 秒，取出即消费，
+  只缓存 `#EXTM3U` 开头的响应）。用 `HttpURLConnection` 拉取 —— 与 ExoPlayer 的
+  `DefaultHttpDataSource` 同一套连接栈，读完不 `disconnect`，socket 回进程级 keep-alive 池，
+  紧接着的分片请求能复用。master playlist 会顺带预热第一路子 playlist。
+- 新增 `PrefetchDataSource.kt`：包在网络 DataSource 外面，只接管「整份读取」（position=0、
+  不限长）的请求；命中走内存并把重定向后的最终地址作为 HLS 相对路径的基地址，未命中原样透传。
+  广告过滤仍在外层由 `M3u8AdFilterDataSource` 现场做（缓存的是未过滤原始列表）。
+- 触发点：详情页渲染剧集时预热「最可能起播的那一集」（`js/tv-remote.js` → `AndroidTV.warmup`）、
+  点 OK 再补一次、历史直达 player.html 前预热、`MainActivity.launchNativePlayer` 兜底再补一次。
+- `PlayerActivity`：起播缓冲 2.5s → 1s、重缓冲 5s → 3s，min/max buffer 收紧到 15s/45s
+  （电视内存友好）；起播与切集时预热下一集，片尾前 3 分钟内再刷一次；播放失败清空预热缓存。
+- `versionCode` 6 → 7，`versionName` 1.1.1（与 `package.json` / `js/config.js` 对齐）。
+
+**待验证**（本机无 JDK / Android SDK，只能靠 CI 出包）：
+
+- [ ] 手动触发 `Build Veliora APK`，确认 `PlaybackPrefetch` / `PrefetchDataSource` / 新增的
+      `DefaultLoadControl` 编译通过。
+- [ ] 电视上对比：同一部片（多码率源 + 单码率源）起播耗时、切集耗时、
+      返回前台（重建播放器）耗时。
+- [ ] 确认起播缓冲降到 1 秒后，弱网下不会出现「出画面即卡」；若明显变差，把
+      `BUFFER_FOR_PLAYBACK_MS` 回调到 1500。
+- [ ] 观察日志 `VelioraPrefetch`：预热命中率（「预热完成 Xms」）与耗时；命中率低说明 URL
+      对不上（例如源站 302 到另一个地址、或集数 URL 带一次性 token）。
+- [ ] 确认广告过滤结果没有变化（预热只换数据来源，不跳过过滤）。
+
+**下一步（未做）**：首个分片的内存预热（把第一段 TS/fMP4 也提前拉下来）。收益最大，但广告
+过滤可能把首发分片整段删掉，会白下几 MB；要做需要先让预热读到过滤后的播放列表。
+
 ## P0 统一代理核心（server.mjs + Serverless）— 已完成
 
 **原问题**：仓库里有 4 套服务端代理 + 1 套 Android 原生代理，只有 `server.mjs` 和
@@ -135,6 +170,9 @@
 ## 已完成 / 已知限制
 
 ### 已完成
+
+- **起播/切集提速**：播放列表内存预热 + keep-alive 连接复用 + 起播缓冲 2.5s→1s +
+  下一集预载，`versionCode` → 7（待实机验证，见 P0）。
 
 - **清晰度徽章方案 A**：从 `vod_remarks` 正则猜清晰度，搜索卡片与详情页源标签显示。
 - **搜索提速与稳定性**：单源单页抓取、只重试瞬时错误、断开即中止上游、源级熔断、

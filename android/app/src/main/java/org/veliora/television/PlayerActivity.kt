@@ -33,6 +33,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -118,6 +119,18 @@ class PlayerActivity : Activity() {
         private const val FUNCTION_BAR_BOTTOM_DP = 120
         private const val FUNCTION_BAR_KEEP_MS = 2_000L
         private const val SPEED_INTERVAL_MS = 500L
+
+        // ---------- 起播/切集提速 ----------
+        // 起播缓冲：默认要攒 2.5 秒媒体才开始播。整段分片普遍是 2~4 秒，于是常常要白等
+        // 一个分片的往返；降到 1 秒，短分片能立刻出画面，长分片也不受影响（它本来就够）。
+        // 断流后的恢复阈值同步降到 3 秒，避免弱网下 1 秒起播立刻又停。
+        private const val BUFFER_MIN_MS = 15_000
+        private const val BUFFER_MAX_MS = 45_000
+        private const val BUFFER_FOR_PLAYBACK_MS = 1_000
+        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 3_000
+        // 下一集播放列表预热的触发窗口 / 最短重试间隔（缓存在 PlaybackPrefetch 里 90s 过期）
+        private const val WARM_NEXT_BEFORE_END_MS = 180_000L
+        private const val WARM_NEXT_REFRESH_MS = 60_000L
     }
 
     private lateinit var playerView: PlayerView
@@ -212,9 +225,13 @@ class PlayerActivity : Activity() {
     private val skipChecker = object : Runnable {
         override fun run() {
             checkSkipSegments()
+            maybeWarmNextEpisode()
             handler.postDelayed(this, SKIP_TICK_MS)
         }
     }
+
+    // ---------- 下一集预热 ----------
+    private var nextWarmAtMs = 0L
 
     // ---------- 清晰度 ----------
     private data class QualityOption(val group: Tracks.Group, val trackIndex: Int, val height: Int, val bitrate: Int)
@@ -407,16 +424,28 @@ class PlayerActivity : Activity() {
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(10_000)
             .setReadTimeoutMs(30_000)
+        // 广告过滤包在预热层外面：先命中内存里的播放列表，再照常做分片过滤
+        val networkFactory: DataSource.Factory = PrefetchDataSource.Factory(httpFactory)
         val dataSourceFactory: DataSource.Factory =
             if (intent.getBooleanExtra(EXTRA_AD_FILTER, true))
-                M3u8AdFilterDataSource.Factory(httpFactory)
-            else httpFactory
+                M3u8AdFilterDataSource.Factory(networkFactory)
+            else networkFactory
 
         // 硬解优先，失败时允许回退软解（低端芯片上部分异常流可救活）
         val renderersFactory = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
 
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                BUFFER_MIN_MS,
+                BUFFER_MAX_MS,
+                BUFFER_FOR_PLAYBACK_MS,
+                BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+            )
+            .build()
+
         val exo = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setLoadControl(loadControl)
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .build()
         player = exo
@@ -427,6 +456,8 @@ class PlayerActivity : Activity() {
                 currentVideoHeight = 0
                 stallSkips = 0    // 跳过次数按集算
                 pendingIntroSkip = true
+                nextWarmAtMs = 0L
+                warmNextEpisode()  // 切集时少两段播放列表往返
                 showOverlayHint()
             }
 
@@ -457,6 +488,8 @@ class PlayerActivity : Activity() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                // 预热的播放列表可能已经失效（源站换了 token / 内容），清掉免得反复踩同一份
+                PlaybackPrefetch.clear()
                 // 原生管线播不了的流（如奇葩封装），回退 WebView hls.js 播放器兜底
                 Toast.makeText(
                     this@PlayerActivity,
@@ -486,6 +519,10 @@ class PlayerActivity : Activity() {
         exo.setMediaItems(episodes.map(MediaItem::fromUri), startIndex, startPosMs)
         exo.playWhenReady = resumePlayWhenReady
         exo.prepare()
+        // 起播这一集的播放列表通常已由页面预热过（PlaybackPrefetch），这里顺手把下一集也拉热，
+        // 用户按「下一集」/跳片尾时不用再等 master + 子列表两次往返
+        nextWarmAtMs = android.os.SystemClock.elapsedRealtime()
+        warmNextEpisode()
 
         if (!fromBackground && startPosMs != C.TIME_UNSET && startPosMs > 0) {
             Toast.makeText(this, "已从上次进度继续播放", Toast.LENGTH_SHORT).show()
@@ -787,6 +824,29 @@ class PlayerActivity : Activity() {
             if (multi) prefs.getInt(KEY_SKIP_INTRO_DEFAULT, 0) else 0)
         skipOutroSec = prefs.getInt(PREFIX_SKIP_OUTRO + videoTitle,
             if (multi) prefs.getInt(KEY_SKIP_OUTRO_DEFAULT, 0) else 0)
+    }
+
+    /**
+     * 把下一集的播放列表拉热。只在「当前集已经拿到时长」之后才有意义，
+     * 由每秒的 skipChecker 顺带驱动：进入片尾前 3 分钟内预热一次，60 秒后才允许再刷。
+     */
+    private fun maybeWarmNextEpisode() {
+        val exo = player ?: return
+        if (!exo.hasNextMediaItem()) return
+        val dur = exo.duration
+        if (dur <= 0) return
+        val remaining = dur - exo.currentPosition
+        if (remaining <= 0 || remaining > WARM_NEXT_BEFORE_END_MS) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - nextWarmAtMs < WARM_NEXT_REFRESH_MS) return
+        warmNextEpisode()
+    }
+
+    private fun warmNextEpisode() {
+        val exo = player ?: return
+        nextWarmAtMs = android.os.SystemClock.elapsedRealtime()
+        val next = episodes.getOrNull(exo.currentMediaItemIndex + 1) ?: return
+        PlaybackPrefetch.warm(next)
     }
 
     private fun checkSkipSegments() {

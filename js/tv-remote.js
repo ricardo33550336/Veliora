@@ -127,6 +127,15 @@
         return url;
     }
 
+    // 起播预热：跳 player.html 之前，让原生把 m3u8 播放列表先拉到内存。
+    // 原生播放器打开同一地址时直接命中，省掉 DNS/握手 + master 与子 playlist 的往返。
+    // 浏览器（没有 AndroidTV 桥）静默跳过。
+    function warmupPlayback(url) {
+        try {
+            if (url && window.AndroidTV && typeof AndroidTV.warmup === 'function') AndroidTV.warmup(url);
+        } catch (e) { /* 预热失败不影响正常播放 */ }
+    }
+
     // 可用采集源（selectedAPIs 中的内置源 + custom_N 自定义源）
     function getSources() {
         const customs = getCustomAPIs();
@@ -818,6 +827,7 @@
             sourceCode: item.sourceCode, vodId: item.vod_id, pic: item.vod_pic,
             position: item.playbackPosition, showIdentifier: item.showIdentifier,   // 沿用旧记录的标识，别写成第二条
         });
+        warmupPlayback(url);
         window.location.href = 'player.html?' + new URLSearchParams({
             url,
             title: item.title || '',
@@ -1768,6 +1778,8 @@
         const order = [...episodes.keys()];
         if (epReversed) order.reverse();
         const resumeIdx = (state.detail && state.detail.resumeIndex);
+        // 详情页停留期间就把「最可能起播的那一集」的播放列表拉热（用户选集通常要几秒）
+        warmupPlayback(episodes[resumeIdx > 0 && resumeIdx < episodes.length ? resumeIdx : 0]);
         let resumeEl = null;
         order.forEach(i => {
             const ep = document.createElement('div');
@@ -1881,6 +1893,8 @@
             pic,
             returnUrl: 'index.html'
         });
+        // 点 OK 这一下再补一次：覆盖「在详情页停很久，预热已过期」的情况
+        warmupPlayback(episodes[index]);
         window.location.href = 'player.html?' + params.toString();
     }
 
